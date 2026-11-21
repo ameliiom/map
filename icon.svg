@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384" viewBox="0 0 96 96">
+  <title>Trailgrid Maps</title>
+  <path d="M0 0h96v96H0z" fill="#0b202a"/>
+  <rect x="2" y="2" width="92" height="92" rx="20" fill="#102b36"/>
+  <path d="M16 38 36 31 59 40 80 32v36l-21 9-23-9-20 7z" fill="#388984"/>
+  <path d="m36 31 23 9v37l-23-9z" fill="#5db4a3"/>
+  <path d="m59 40 21-8v36l-21 9z" fill="#398078"/>
+  <path d="M23 61 36 56l11 4 12-10 14-5" fill="none" stroke="#d7f4e7" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+  <path d="M47 15c-9 0-16 7-16 16 0 12 16 24 16 24s16-12 16-24c0-9-7-16-16-16z" fill="#ffc264" stroke="#102b36" stroke-width="3.5"/>
+  <circle cx="47" cy="31" r="5.5" fill="#102b36"/>
+</svg>
