@@ -17,7 +17,7 @@ use std::{
 };
 
 pub const MOD_ID: &str = "trailgrid_maps";
-pub const MOD_TITLE: &str = "Trailgrid Maps";
+pub const MOD_TITLE: &str = "trail";
 pub const WORLD_MAP_KEY: &str = "world_map";
 pub const WORLD_MAP_DEFAULT: &str = "key.keyboard.m";
 pub const WAYPOINTS_KEY: &str = "waypoints";
