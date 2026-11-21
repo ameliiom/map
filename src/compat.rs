@@ -175,12 +175,12 @@ impl MapAccess for Game<'_> {
 
 fn setting<'a>(game: &'a Game<'_>, key: &str) -> Option<&'a horizon_client::mod_list::NativeSettingValue> {
     Some(&game.settings.mods.installed.iter()
-        .find(|m| m.id == ::trailgrid_maps::runtime::MOD_ID)?
+        .find(|m| m.id == ::map::runtime::MOD_ID)?
         .native.as_ref()?.settings.iter().find(|row| row.key == key)?.value)
 }
 
-pub fn xaero_radar_categories(source: &str, skipped: &mut Vec<String>) -> Option<::trailgrid_maps::radar::ImportedCategory> {
-    use ::trailgrid_maps::radar::{ImportedCategory, Selector};
+pub fn xaero_radar_categories(source: &str, skipped: &mut Vec<String>) -> Option<::map::radar::ImportedCategory> {
+    use ::map::radar::{ImportedCategory, Selector};
     use serde_json::Value;
 
     fn decode(node: &Value, skipped: &mut Vec<String>, depth: usize, next: &mut usize) -> Option<ImportedCategory> {
@@ -268,7 +268,7 @@ fn setting_text(game:&Game<'_>,key:&str) -> Option<String> {
 
 pub(super) fn write_map_setting(game:&mut Game<'_>,key:&str,value:&str) -> bool {
     use horizon_client::mod_list::NativeSettingValue as Value;
-    use ::trailgrid_maps::runtime::MOD_ID;
+    use ::map::runtime::MOD_ID;
     let Some(mut next)=setting(game,key).cloned() else {return false;};
     let valid=match &mut next {
         Value::Toggle(flag)=>value.parse::<bool>().map(|v|*flag=v).is_ok(),
@@ -287,10 +287,10 @@ pub(super) fn write_map_setting(game:&mut Game<'_>,key:&str,value:&str) -> bool 
     true
 }
 
-pub fn apply_xaero_settings(game: &mut Game<'_>, mut import: ::trailgrid_maps::xaero_settings::Import)
+pub fn apply_xaero_settings(game: &mut Game<'_>, mut import: ::map::xaero_settings::Import)
     -> std::io::Result<(usize,Vec<String>,Option<String>)>
 {
-    use ::trailgrid_maps::{runtime::{MOD_ID,write_preferences_file},xaero_settings};
+    use ::map::{runtime::{MOD_ID,write_preferences_file},xaero_settings};
     use std::{collections::BTreeMap,fs::File,io::{self,Read}};
     let directory=game.native_data_dir(MOD_ID);
     let mut applied=0;
@@ -347,14 +347,14 @@ pub fn apply_xaero_settings(game: &mut Game<'_>, mut import: ::trailgrid_maps::x
     Ok((applied,import.unsupported,import.profile))
 }
 
-const SETTING_SLOTS: usize = ::trailgrid_maps::runtime::SDK_SETTING_SLOTS;
+const SETTING_SLOTS: usize = ::map::runtime::SDK_SETTING_SLOTS;
 
 struct Synced {
     values: [Option<u64>; SETTING_SLOTS],
-    preferences: ::trailgrid_maps::runtime::minimap::Settings,
+    preferences: ::map::runtime::minimap::Settings,
 }
 fn row_button(key: &str) -> Option<usize> {
-    use ::trailgrid_maps::runtime as rt;
+    use ::map::runtime as rt;
     match key {
         "cache_ram_mib" => Some(18),
         "cache_manager" => Some(19),
@@ -369,7 +369,7 @@ fn row_button(key: &str) -> Option<usize> {
 // Only changed preferences reach the SDK's persistence API. Ordinary frames
 // compare fixed-size snapshots without filesystem access or allocations.
 pub fn sync_settings(game: &mut Game<'_>) {
-    use ::trailgrid_maps::{self as entry, runtime as rt};
+    use ::map::{self as entry, runtime as rt};
     use horizon_client::mod_list::NativeSettingValue as Value;
     static LAST: std::sync::OnceLock<std::sync::Mutex<Synced>> = std::sync::OnceLock::new();
     let controller = rt::initialize(game.native_data_dir(rt::MOD_ID));

@@ -1,8 +1,9 @@
-id = "trailgrid_maps"
-name = "trail"
-version = "0.1.1"
-description = "Explore with a configurable minimap, a persistent world map, waypoint groups, and entity radar."
-authors = ["daniliammo", "Gurov08ruS"]
+id = "map"
+name = "Map"
+version = "0.1.0"
+description = "A minimap and a world map that remembers where you have been: waypoints, death points, entity radar, cave view and more."
+authors = ["ameliiom"]
+credits = "Adapted from trail by groznen95, itself based on Minimap, Worldmap and waypoints reworked by daniliammo and Gurov08ruS (GPL-3.0)."
 license = "GPL-3.0-only"
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins, beside data/ and assets/.
 api = "0.2"
@@ -12,7 +13,7 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "8f83e5c85ae3b9a117f742e8d91170c5c9080a06"
+horizon = "f037744a79f9982c47876f49c5a3067279f88706"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 [[native.module]]

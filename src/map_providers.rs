@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use ::trailgrid_maps::runtime::Dimension;
+use ::map::runtime::Dimension;
 use horizon_core::nbt::Limits;
 use horizon_protocol::buf::Reader;
 use std::collections::BTreeMap;
@@ -95,7 +95,7 @@ pub fn update_waystones(stones: &mut BTreeMap<u128, Waystone>, channel: &str, by
 
 // OpenPAC announces a dimension, owner states and region palettes independently.
 // Retain their indices so a removed state is immediately invisible in all regions.
-use ::trailgrid_maps::map_claims::Chunk;
+use ::map::map_claims::Chunk;
 use horizon_core::nbt::Tag;
 const MAX_CLAIM_CHUNKS: usize = 65_536;
 

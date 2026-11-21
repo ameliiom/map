@@ -1,0 +1,28 @@
+[package]
+name = "horizon-mod-point-shape"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+description = "The shape of an injection point, shared by #[point] and the mod API generator"
+publish = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+build = false
+
+[lib]
+name = "point_shape"
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["proc-macro", "span-locations"] }
+quote = { version = "1", features = ["proc-macro"] }
+serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }
+serde_json = { version = "1", features = ["raw_value", "std"] }
+syn = { version = "2", features = ["clone-impls", "derive", "full", "parsing", "printing", "proc-macro", "visit", "visit-mut"] }
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+large_enum_variant = "allow"

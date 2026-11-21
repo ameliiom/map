@@ -52,7 +52,7 @@ impl Hooks for Mod {
         event: &mut RegisterGuiLayersEvent<'_>,
     ) {
         event.layers.push(GuiLayer {
-            id: "trailgrid_maps:background".into(),
+            id: "map:background".into(),
             placement: GuiLayerPlacement::Below("minecraft:effects".into()),
         });
     }

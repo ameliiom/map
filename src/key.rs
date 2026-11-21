@@ -6,7 +6,7 @@ fn on_map_key(
     modifiers: u32,
 ) {
     use crate::game::minimap_compat::MapAccess;
-    use ::trailgrid_maps::runtime;
+    use ::map::runtime;
     if game.native_window()
         && game.map_on(runtime::MOD_ID)
         && game.mod_key(runtime::MOD_ID, "quick_minimap")

@@ -16,7 +16,7 @@ macro_rules! localized_format {
     };
 }
 
-use ::trailgrid_maps::runtime::{
+use ::map::runtime::{
     self as runtime, Dimension, Waypoint,
     maps::{self, Layer, Portal, View},
 };
@@ -451,14 +451,14 @@ struct State {
     slime_seed: Option<i64>,
     slime_preview: bool,
     slime_overlay: bool,
-    claims: BTreeMap<::trailgrid_maps::map_claims::Chunk, Option<String>>,
+    claims: BTreeMap<::map::map_claims::Chunk, Option<String>>,
     opac: super::minimap_providers::OpenPac,
-    info_displays: Option<Vec<::trailgrid_maps::xaero_settings::InfoDisplay>>,
+    info_displays: Option<Vec<::map::xaero_settings::InfoDisplay>>,
     notice: Option<(String, Instant)>,
     export: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     waypoint_import: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
     cache_import: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
-    settings_import: Option<std::sync::mpsc::Receiver<std::io::Result<::trailgrid_maps::xaero_settings::Import>>>,
+    settings_import: Option<std::sync::mpsc::Receiver<std::io::Result<::map::xaero_settings::Import>>>,
     xaero_radar_enabled: Option<bool>,
     xaero_profile: Option<String>,
     map_items: [Option<String>;2],
@@ -1695,7 +1695,7 @@ fn configured_teleport(
     } else {
         ("tp_map","tp @s {x} {y} {z}")
     };
-    use ::trailgrid_maps::xaero_settings;
+    use ::map::xaero_settings;
     let directory=game.native_data_dir(runtime::MOD_ID);
     let profile=xaero_settings::active_profile(&directory);
     let templates=xaero_settings::teleport_commands(&xaero_settings::commands_directory(&directory,profile.as_deref())).unwrap_or_default();
@@ -1733,7 +1733,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
     match action {
         MenuAction::ReloadRadarRules => {
             let directory = game.native_data_dir(runtime::MOD_ID);
-            let message = match ::trailgrid_maps::radar::load_rules(&directory, true) {
+            let message = match ::map::radar::load_rules(&directory, true) {
                 Ok((loaded, skipped)) => localized_format!(
                     "Radar rules {} · skipped {} · radar-rules.txt", "Правил радара {} · пропущено {} · radar-rules.txt",
                     "Règles radar {} · ignorées {} · radar-rules.txt", "Reglas {} · omitidas {} · radar-rules.txt",
@@ -1749,7 +1749,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
             let next=action==MenuAction::NextXaeroProfile;
             let (send, reply) = std::sync::mpsc::channel();
             let worker = std::thread::Builder::new().name("map-settings-import".into()).spawn(move || {
-                let _ = send.send(::trailgrid_maps::xaero_settings::read_active(&source,next));
+                let _ = send.send(::map::xaero_settings::read_active(&source,next));
             });
             match worker {
                 Ok(_) => state.settings_import = Some(reply),
@@ -1859,7 +1859,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 && (1..=16).contains(&name.len())
                 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             {
-                use ::trailgrid_maps::xaero_settings;
+                use ::map::xaero_settings;
                 let directory = game.native_data_dir(runtime::MOD_ID);
                 let profile = xaero_settings::active_profile(&directory);
                 let commands = xaero_settings::teleport_commands(&xaero_settings::commands_directory(&directory, profile.as_deref())).unwrap_or_default();
@@ -1926,7 +1926,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
 }
 
 fn xaero_cache_reader(game: &Game<'_>) -> maps::ReadXaeroRegion {
-    use ::trailgrid_maps::xaero_cache as xaero;
+    use ::map::xaero_cache as xaero;
     use horizon_core::nbt::{self, Tag};
     use std::io::{self, Read};
     let resources = Arc::clone(&game.res);
@@ -3689,7 +3689,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     if state.world != world {
         controller.clear_temporary_waypoints(&state.world);
         let next = state.session + 1;
-        if let Err(error) = ::trailgrid_maps::radar::load_rules(&game.native_data_dir(runtime::MOD_ID), false) {
+        if let Err(error) = ::map::radar::load_rules(&game.native_data_dir(runtime::MOD_ID), false) {
             eprintln!("[{}] Radar rules: {error}", runtime::MOD_ID);
         }
         let slime_seed = if game.integrated.is_some() {
@@ -3708,7 +3708,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             world,
             session: next,
             slime_seed,
-            xaero_profile: ::trailgrid_maps::xaero_settings::active_profile(&game.native_data_dir(runtime::MOD_ID)),
+            xaero_profile: ::map::xaero_settings::active_profile(&game.native_data_dir(runtime::MOD_ID)),
             pending_command: (official_smp(game)
                 && (game.map_option("minimap_claims") != Some(0)
                     || game.map_option("world_claims") != Some(0)
@@ -3717,7 +3717,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         };
         controller.maps.reset(next);
     }
-    use ::trailgrid_maps::map_claims;
+    use ::map::map_claims;
     let claim_replies = map_claims::take_replies();
     if official_smp(game) {
         for reply in claim_replies {
@@ -3737,18 +3737,18 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let enabled = game.map_option("use_xaero_radar") == Some(1);
     if state.xaero_radar_enabled != Some(enabled) {
         let categories = enabled.then(|| {
-            use ::trailgrid_maps::xaero_settings;
+            use ::map::xaero_settings;
             let directory=xaero_settings::profile_directory(&game.native_data_dir(runtime::MOD_ID),state.xaero_profile.as_deref());
             let source=xaero_settings::read_radar_categories(&directory).ok().flatten()?;
             super::minimap_compat::xaero_radar_categories(&source,&mut Vec::new())
         }).flatten();
-        use ::trailgrid_maps::xaero_settings;
+        use ::map::xaero_settings;
         let directory=game.native_data_dir(runtime::MOD_ID);
         let item_config=xaero_settings::commands_directory(&directory,state.xaero_profile.as_deref());
         let values=xaero_settings::teleport_commands(&item_config).unwrap_or_default();
         state.map_items=["minimap_item","map_item"].map(|key|values.get(key)
             .filter(|item|item.as_str()!="-").cloned());
-        ::trailgrid_maps::radar::use_imported(categories);
+        ::map::radar::use_imported(categories);
         let info_directory = xaero_settings::profile_directory(&directory, state.xaero_profile.as_deref());
         state.info_displays = xaero_settings::read_info_display(&info_directory).ok().flatten();
         state.xaero_radar_enabled = Some(enabled);
@@ -4685,7 +4685,7 @@ pub(super) fn check_map_item(game:&mut Game<'_>,large:bool)->bool {
 }
 
 type InfoLine = (String, Option<u32>, Option<u32>);
-fn claim_text(game: &Game<'_>, state: &State, key: ::trailgrid_maps::map_claims::Chunk) -> Option<String> {
+fn claim_text(game: &Game<'_>, state: &State, key: ::map::map_claims::Chunk) -> Option<String> {
     let prefix = tr("Claim", "Приват", "Claim", "Parcela", "Claim");
     let own = tr("yours", "твой", "à toi", "tuya", "dein");
     if let Some(owner) = state.claims.get(&key) {
@@ -5209,7 +5209,7 @@ fn draw_chunk_grid(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f3
 }
 
 pub(super) fn tick_radar(game: &Game<'_>) {
-    use ::trailgrid_maps::radar::{self, Facts};
+    use ::map::radar::{self, Facts};
     if !game.native_window() || game.is_logical_server() || !game.map_on(runtime::MOD_ID) {
         return;
     }
@@ -5273,7 +5273,7 @@ pub(super) fn tick_radar(game: &Game<'_>) {
     });
 }
 
-fn radar_icon(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::trailgrid_maps::radar::Dot, dst: [f32;4], opacity: u32) -> bool {
+fn radar_icon(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::map::radar::Dot, dst: [f32;4], opacity: u32) -> bool {
     if dot.kind == "minecraft:player" {
         let skin = mob.map(|mob| mob.skin.as_deref().unwrap_or(&mob.kind.texture)).unwrap_or("entity/player/wide/steve");
         if game.native_sprite(batch, skin, [8.,8.,8.,8.], dst, Some(opacity | 0xffffff)) {
@@ -5326,7 +5326,7 @@ fn radar_uv_area(face: &horizon_client::mobs::Polygon) -> f32 {
 }
 
 fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], round: bool, after_frame: bool) {
-    let Some(radar) = ::trailgrid_maps::radar::snapshot() else { return };
+    let Some(radar) = ::map::radar::snapshot() else { return };
     if radar.dimension != view.dimension.id() || (view.large && !radar.world_map) { return; }
     let dots = radar.dots.iter().filter(|dot| !view.large && dot.over_frame == after_frame || view.large && !after_frame);
     let mobs: horizon_client::fast_hash::FxHashMap<_,_> = if radar.smooth || dots.clone().any(|dot| dot.icon) {
@@ -5431,7 +5431,7 @@ fn draw_locator_waypoints(game: &Game<'_>, batch: &mut HudBatch, view: &View, re
     if !enabled || !game.native_player().is_some_and(|player| player.dimension == view.dimension.id()) {
         return;
     }
-    let visible_radar = ::trailgrid_maps::radar::snapshot()
+    let visible_radar = ::map::radar::snapshot()
         .filter(|radar| !view.large || radar.world_map);
     for point in LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).iter() {
         if let WaypointId::Uuid(uuid) = point.id
@@ -7534,7 +7534,7 @@ fn menu_target_at(
     let rough = coverage.lod_sample(state.selected, frame.view.layer, block);
     let height_approximate = height.is_none() && rough.is_some();
     let height = height.or_else(|| rough.map(|p| p.height));
-    let radar_player = ::trailgrid_maps::radar::snapshot()
+    let radar_player = ::map::radar::snapshot()
         .filter(|radar| radar.world_map && radar.dimension == frame.view.dimension.id())
         .and_then(|radar| radar.dots.iter().filter_map(|dot| {
             game.remote_player_name(dot.entity_id)?;
