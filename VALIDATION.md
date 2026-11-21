@@ -1,17 +1,16 @@
-# Trailgrid Maps 0.1.0 release checks
+# trail 0.1.1 release checks
 
 | Item | Result |
 | --- | --- |
-| Package | `trailgrid_maps-0.1.0.hmod`, 309,784 bytes, unsigned native source package |
-| SHA-256 | `0ec0f3cc57e1d1565e76b67ba787a7b5fc45827a2cf728676c17b175b71b8b93` |
-| Target | Minecraft Java Edition 26.3, `nightly-2026-11-20-0a875da` |
-| Horizon revision | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |
+| Package | `trailgrid_maps-0.1.1.hmod`, 309,770 bytes, unsigned native source package |
+| SHA-256 | `7739fb61259e1bb8717c60e33e2d6233ca7549e0522b1e130781cd87791bb670` |
+| Target | Minecraft Java Edition 26.3, `nightly-2026-11-21-8f83e5c` |
+| Horizon revision | `8f83e5c85ae3b9a117f742e8d91170c5c9080a06` |
 | Mixins revision | `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` |
-| Exact-SDK build | Horizon Launcher 0.2.93 built the packaged mod in a clean Apple Silicon macOS test instance and selected `native-0a875da-d59fed1a454b`. |
-| Package checks | `cargo horizon-mod check` accepted the package as `native-mod`. Packaged source and assets match the release source. |
-| English strings | The `en_us` table has 285 entries. All statically named SDK labels were matched against the table. |
-| Local play | English settings, waypoint creation, case-insensitive search, selection, map navigation, and return with Escape passed in a disposable world. A setting changed in-game persisted to disk. |
-| Existing data | Copied a previous build's test cache and data byte-for-byte to the new mod directory. Horizon opened a copy of the original world after backing it up. The new mod loaded its saved setting and both previous waypoints and opened the map using the existing world identity. |
-| Rust tests | 132 passed, 0 failed, 3 ignored. |
+| Exact-SDK build | Horizon Launcher 0.2.93 built the release `.hmod` in an Apple Silicon macOS test profile and selected `native-8f83e5c-73a2a4d7a242`. |
+| Package check | `cargo horizon-mod check` accepted the package as `native-mod`. |
+| Rust tests | 132 passed, 0 failed, 3 ignored using the verified API source for the Nov 21 SDK. |
+| Local play | Through the launcher, opened a disposable copy of the previous test world. Existing waypoints and the saved map setting loaded. The settings menu, persistence, waypoint creation and search, and navigation to the selected waypoint passed. |
+| Existing data | Copied the v0.1.0 test cache and data byte-for-byte to the new test profile before starting. The mod uses the same data path for both versions. |
 
-Windows and Linux runs, live Horizon SMP, and the catalog review are outside these checks.
+Live Horizon SMP, Windows, and Linux were outside these checks. See [v0.1.0 validation](https://github.com/groznen95/TailgridMaps/blob/v0.1.0/VALIDATION.md) for the November 20 build.
