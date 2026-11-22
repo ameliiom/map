@@ -1,33 +1,25 @@
-# trail
+# Map
 
-trail is a client-side Horizon mod with a configurable minimap, a world map that remembers explored terrain, a searchable waypoint list, and entity radar. Map data stays in your local Horizon profile, with separate caches for each world and server.
+A minimap and a world map for [Horizon](https://playhorizon.dev) (Minecraft: Java Edition 26.3 in Rust), in Minecraft's own look: a bevelled minimap that turns with you, every creature as its own face, waypoints and death points, a full-screen world map of everywhere you have been. English and Arabic; Arabic mirrors every screen.
 
-| Default key | Action |
-| --- | --- |
-| `M` | Open the world map. Drag to pan and scroll to zoom. |
-| `N` | Open the waypoint list. Filter by group or dimension, search by name, and sort the results. Press Enter to show the selected waypoint on the map. |
-| `B` | Add a waypoint at your current position. |
-| `Y` | Open map settings. The same settings are available from the map and waypoint list. |
-| `Z` | Enlarge the minimap. |
-
-The interface follows your game language and defaults to English. To use the release in English, choose **English (US)** in Minecraft's language settings. Saved waypoint names stay as entered.
+## What it shows
+- **Minimap**: square or circle, rotating or north-locked, zoom 1–6, compass letters, the faces of nearby players, mobs and items (darker below you), waypoints (clamped to the edge when far), coordinates and optional biome, dimension, time and light.
+- **World map** (`M`): explored ground on black, cursor coordinates and biome, zoom, waypoints as pennants, a right-click menu (create waypoint, teleport, share, export PNG) and a waypoint mini-menu.
+- **Waypoints**: list, create and edit screens, sets, sharing, death points.
+- Cave view, chunk grid, slime chunks, light overlay, footsteps, PNG export, and import of Xaero's waypoints and settings.
 
 ## Install
+1. Copy `map.hmod` into `%APPDATA%\horizon\horizon-native-mods\`.
+2. Add the line `mod.map:true` to `%APPDATA%\horizon\horizon-mods.txt`.
+3. Build: in the launcher's Mods page press **Build**, or run `horizon-launcher native-build --instance horizon --trust-native-code`. Needs launcher 0.2.82 or later. A native mod runs with your rights: install it only from a source you trust.
 
-Version 0.1.1 targets **Horizon Nightly 2026-11-21 (`8f83e5c`)** and **Minecraft Java Edition 26.3**. It is a native source `.hmod`; Horizon Launcher builds it with the signed SDK for that exact Nightly. To install the release manually, put the package at `horizon-native-mods/trailgrid_maps.hmod` inside the instance directory. Enable trail and build native mods for that instance.
+Built for Horizon Nightly `f037744` (2026-11-21).
 
-Use [v0.1.0](https://github.com/groznen95/TailgridMaps/releases/tag/v0.1.0) for Nightly 2026-11-20 (`0a875da`). Updating from v0.1.0 to v0.1.1 keeps the same mod ID and data directory.
+## Build
+```powershell
+cargo horizon-mod build
+```
+The source package is `target\horizon-mod\map.hmod`; the launcher compiles it (step 3 above).
 
-Radar shows entities the client receives. Map teleport requires server permissions. On Horizon SMP the claim overlay can query `/claims` and `/claim info`; Waystones and Open Parties and Claims overlays depend on compatible data from the server. This release was tested in a local world on Apple Silicon macOS. Live Horizon SMP and optional server integrations were outside that release test.
-
-## Copy maps and waypoints from a previous build
-
-Close the game and use a profile with only one mapping mod enabled. trail has its own mod ID and data directory. Before opening a world with it, copy the contents of `horizon-mods/.horizon-mod-data/minimap_worldmap_waypoints_reworked/` to `horizon-mods/.horizon-mod-data/trailgrid_maps/` in the target profile. Keep the original directory as a backup. For an existing Trailgrid profile, back up both directories and copy selected files explicitly to avoid replacing newer data. Use the same save folder name or server address so the copied map and waypoints resolve to the same world. If Horizon reports the old mod ID as missing in a single-player save, choose **Back Up and Open** after checking that the list only names the old map mod. Rebind custom keys in the new profile as needed.
-
-The world map's import tools can also read supported waypoint, settings and cache formats from existing Xaero's Minimap and Xaero's World Map data. The Java mods themselves are separate products.
-
-## Source and license
-
-trail is licensed under [GPL-3.0-only](LICENSE). It is based on [Minimap, Worldmap and waypoints reworked](https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked), created by daniliammo and continued by Gurov08ruS. See [NOTICE](NOTICE) and [LICENSE-MIT](LICENSE-MIT) for attribution and the original template's license. The icon is original to trail. The release package contains the Rust source and assets used by the launcher.
-
-Compatibility with existing data refers to [Xaero's Minimap](https://www.curseforge.com/minecraft/mc-mods/xaeros-minimap) and [Xaero's World Map](https://www.curseforge.com/minecraft/mc-mods/xaeros-world-map) by Xaero. trail is an independent project.
+## Licence
+GPL-3.0-only, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Adapted from [trail](https://github.com/groznen95/trailgrid) by groznen95, itself derived from Minimap, Worldmap and waypoints reworked by daniliammo and Gurov08ruS. Its look follows Xaero's Minimap and World Map, studied from the running mods; no code or assets from them are included. Not affiliated with Xaero or the Horizon project.

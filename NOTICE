@@ -1,4 +1,4 @@
-trail
+Map, by ameliiom
 
 The project as a whole and its new contributions are licensed under the
 GNU General Public License, version 3 only (SPDX: GPL-3.0-only).
@@ -6,7 +6,10 @@ You may redistribute and/or modify the program under the terms of GPL version 3
 as published by the Free Software Foundation. It is distributed without any
 warranty; see LICENSE for the full terms, including the disclaimer of warranty.
 
-Derived from Minimap, Worldmap and waypoints reworked, created by
+Adapted from trail by groznen95:
+https://github.com/groznen95/trailgrid
+
+trail is derived from Minimap, Worldmap and waypoints reworked, created by
 daniliammo and continued by Gurov08ruS:
 https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked
 
