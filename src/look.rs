@@ -85,7 +85,7 @@ pub const ZOOM_STEP: f64 = 1.2;
 /// The zoom label's box.
 pub const ZOOM_BOX: u32 = 0x8000_0000;
 /// Tooltips: a dark translucent box, white text, keys green.
-pub const TOOLTIP_BOX: u32 = 0xC810_0010;
+pub const TOOLTIP_BOX: u32 = 0xE810_0010;
 pub const TOOLTIP_TEXT: u32 = 0xFFFF_FFFF;
 pub const KEY_TEXT: u32 = 0xFF55_FF55;
 /// Greyed text (coordinates and distance rows, disabled labels).
@@ -94,8 +94,8 @@ pub const GREY_TEXT: u32 = 0xFFA0_A0A0;
 /// The right-click menu.
 pub const MENU_BORDER: u32 = 0xFFFF_FFFF;
 pub const MENU_TITLE: u32 = 0xFF60_6060;
-pub const MENU_ROW: u32 = 0xCC00_0000;
-pub const MENU_HOVER: u32 = 0xCC40_4040;
+pub const MENU_ROW: u32 = 0xE600_0000;
+pub const MENU_HOVER: u32 = 0xE640_4040;
 pub const MENU_SEPARATOR: u32 = 0xFF32_3232;
 pub const MENU_ROW_HEIGHT: f32 = 10.0;
 pub const MENU_WIDTH: f32 = 156.0;
@@ -117,6 +117,9 @@ pub const COLUMN_GAP: f32 = 10.0;
 pub const ROW_PITCH: f32 = 24.0;
 /// Settings rows on one page.
 pub const PAGE_ROWS: usize = 6;
+/// What vanilla lays over the blurred world behind an in-game screen
+/// (`Screen.extractTransparentBackground`: rgba 16, 16, 16, 160).
+pub const SCREEN_DIM: u32 = 0xA010_1010;
 /// Vanilla's screen text colours.
 pub const SCREEN_TEXT: u32 = 0xFFFF_FFFF;
 pub const DISABLED_TEXT: u32 = 0xFFA0_A0A0;
@@ -643,16 +646,25 @@ pub fn pennant(at: Point, scale: f32) -> (Rect, [Point; 3]) {
     (body, [[body[0], at[1] - point], [body[0] + w, at[1] - point], at])
 }
 
-/// A tooltip box for text `size` (`[w, h]`) near the pointer, kept on the screen.
-pub fn tooltip_box(pointer: Point, size: [f32; 2], screen: [f32; 2]) -> Rect {
+/// A tooltip box for text `size` (`[w, h]`) describing the control `hovered`, placed as
+/// vanilla places a widget's tooltip: under it, else above it, else beside it; starting at
+/// the pointer, kept on the screen and never covering the control.
+pub fn tooltip_box(pointer: Point, size: [f32; 2], screen: [f32; 2], hovered: Rect) -> Rect {
     let w = size[0] + 6.0;
     let h = size[1] + 4.0;
-    let mut x = pointer[0] + 12.0;
-    if x + w > screen[0] {
-        x = pointer[0] - 12.0 - w;
+    let x = (pointer[0] + 4.0).min(screen[0] - w).max(0.0);
+    let below = hovered[1] + hovered[3] + 2.0;
+    if below + h <= screen[1] {
+        return [x, below, w, h];
     }
-    let y = (pointer[1] - 12.0).min(screen[1] - h).max(0.0);
-    [x.max(0.0), y, w, h]
+    let above = hovered[1] - 2.0 - h;
+    if above >= 0.0 {
+        return [x, above, w, h];
+    }
+    let y = (pointer[1] - h * 0.5).min(screen[1] - h).max(0.0);
+    let right = hovered[0] + hovered[2] + 2.0;
+    let x = if right + w <= screen[0] { right } else { (hovered[0] - 2.0 - w).max(0.0) };
+    [x, y, w, h]
 }
 
 /// The mini-menu beside the right control column: `rows` list rows above a set bar, a filter
@@ -1119,12 +1131,19 @@ mod tests {
     }
 
     #[test]
-    fn tooltips_stay_on_screen() {
+    fn tooltips_stay_on_screen_and_off_the_hovered_control() {
         for screen in SCREENS {
-            for p in [[0.0, 0.0], [screen[0], screen[1]], [screen[0] - 5.0, 3.0]] {
-                for size in [[0.0, 8.0], [120.0, 30.0]] {
-                    let r = tooltip_box(p, size, screen);
-                    assert!(contains([0.0, 0.0, screen[0], screen[1]], r), "{r:?}");
+            let mut hovered = vec![[0.0, 0.0, 30.0, 30.0], [screen[0] - 20.0, screen[1] - 20.0, 20.0, 20.0]];
+            hovered.extend(settings_grid(screen, 12, false).0);
+            hovered.extend(world_controls(screen, true).into_iter().map(|(_, r)| r));
+            hovered.extend(waypoint_list(screen, 30, false).rows);
+            for control in hovered {
+                for p in [[control[0], control[1]], [control[0] + control[2] - 1.0, control[1] + control[3] - 1.0]] {
+                    for size in [[0.0, 9.0], [40.0, 9.0], [160.0, 59.0]] {
+                        let r = tooltip_box(p, size, screen, control);
+                        assert!(contains([0.0, 0.0, screen[0], screen[1]], r), "{r:?} on {screen:?}");
+                        assert!(!overlaps(r, control), "{r:?} covers {control:?} on {screen:?}");
+                    }
                 }
             }
         }

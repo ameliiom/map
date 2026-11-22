@@ -224,6 +224,9 @@ struct LeafPalette {
     states: BTreeMap<u32, LeafColor>,
     snow: u32,
     ice: u32,
+    /// Mean colour of the still water texture: the biome's water tint multiplies it, as the
+    /// game draws water (and Xaero's accurate colours read it).
+    water_texture: u32,
 }
 impl Default for LeafPalette {
     fn default() -> Self {
@@ -231,8 +234,18 @@ impl Default for LeafPalette {
             states: BTreeMap::new(),
             snow: 0xffffff,
             ice: 0xa0a0ff,
+            water_texture: 0xffffff,
         }
     }
+}
+
+/// How much of a texture is opaque, 0 to 1.
+fn texture_coverage(resources: &ClientResources, name: &str) -> f32 {
+    let Some(pixels) = resources.texture(name) else { return 1. };
+    let count = pixels.rgba.len() / 4;
+    if count == 0 { return 1. }
+    let alpha: u64 = pixels.rgba.chunks_exact(4).map(|pixel| u64::from(pixel[3])).sum();
+    alpha as f32 / (count as f32 * 255.)
 }
 
 fn average_texture(resources: &ClientResources, name: &str) -> Option<u32> {
@@ -299,9 +312,6 @@ fn build_leaf_palette(game: &Game<'_>) -> LeafPalette {
                     .iter()
                     .any(|class| class.as_ref() == "LeavesBlock")
             });
-        if !tinted_block {
-            continue;
-        }
         let sprites = states.state(id);
         let face = sprites.sides[Direction::Up as usize]
             .first()
@@ -309,13 +319,28 @@ fn build_leaf_palette(game: &Game<'_>) -> LeafPalette {
         let Some(face) = face else {
             continue;
         };
+        // A full block whose top the biome tints (grass) reads as its texture times the tint;
+        // plants keep their curated colour.
+        let tinted_top = plant_color(name).is_none()
+            && matches!(face.tint, Some(TintSource::Grass | TintSource::Foliage))
+            && sprites.sides[Direction::Up as usize].first().is_some();
+        if !tinted_block && !tinted_top {
+            continue;
+        }
         let texture = face.texture.as_str();
         let rgb = *textures
             .entry(texture.to_owned())
             .or_insert_with(|| average_texture(&resources, texture));
-        let Some(rgb) = rgb else {
+        let Some(mut rgb) = rgb else {
             continue;
         };
+        // Seen from above, a canopy's holes show the shaded leaves under it: its colour is
+        // the texture's mean darkened by the share of the texture that is open.
+        if name.contains("leaves") {
+            let coverage = texture_coverage(&resources, texture);
+            let level = (coverage * 255.).round() as u32;
+            rgb = multiply_color(rgb, (level << 16) | (level << 8) | level);
+        }
         let tint = if name == "minecraft:lily_pad" {
             // Vanilla tints a lily pad with the biome's grass colour; the
             // mesher's constant is only a fallback for its own drawing pass.
@@ -332,6 +357,9 @@ fn build_leaf_palette(game: &Game<'_>) -> LeafPalette {
             }
         };
         palette.states.insert(id.0, LeafColor { rgb, tint });
+    }
+    if let Some(rgb) = average_texture(&resources, "block/water_still") {
+        palette.water_texture = rgb;
     }
     palette
 }
@@ -1663,7 +1691,7 @@ fn menu_distance(game: &Game<'_>, state: &State, menu: Menu, player: &crate::gam
         .or_else(|| menu.height.map(|y| f64::from(y) - player.y));
     let meters = dx.hypot(dz).hypot(y.unwrap_or(0.));
     let limit = game.map_number("world_map_km_at").unwrap_or(-1.);
-    let precision = usize::from(game.map_option("world_map_dist_precision").unwrap_or(1)).max(1);
+    let precision = usize::from(game.map_option("world_map_dist_precision").unwrap_or(1));
     Some(if limit >= 0. && meters >= limit {
         format!("{km:.precision$}km", km = meters / 1000.)
     } else {
@@ -1908,6 +1936,7 @@ fn waypoint_details(game: &Game<'_>, point: &Waypoint) -> Vec<Vec<(String, u32)>
 }
 
 fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    draw_backdrop(game, batch, state);
     let size = [batch.width, batch.height];
     let mouse = game.cursor();
     let (list, rows) = waypoint_screen(game, state, size);
@@ -1940,7 +1969,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game.map_text(batch, &name, [(centre[0] - width * 0.5).round(), centre[1].round()],
             if waypoint.options.disabled { look::DISABLED_TEXT } else { look::SCREEN_TEXT }, true);
         if look::hit(mouse, *row) && !state.waypoint_groups_open {
-            tooltip = Some(waypoint_details(game, waypoint));
+            tooltip = Some((waypoint_details(game, waypoint), *row));
         }
     }
     if rows.is_empty() {
@@ -1956,7 +1985,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(game, batch, delete, &ui("delete"), mouse, selected.is_some());
     button(game, batch, list.done, &ui("done"), mouse, true);
     if look::hit(mouse, share) {
-        tooltip = Some(vec![vec![(ui("tip_share"), look::TOOLTIP_TEXT)]]);
+        tooltip = Some((vec![vec![(ui("tip_share"), look::TOOLTIP_TEXT)]], share));
     }
     if state.waypoint_groups_open {
         for (row, rect) in set_rows(game, state, list.set, list.actions[0][1]) {
@@ -1968,8 +1997,8 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         tooltip = None;
     }
     draw_notice(game, batch, state);
-    if let Some(lines) = tooltip {
-        draw_tooltip_lines(game, batch, &lines, mouse);
+    if let Some((lines, hovered)) = tooltip {
+        draw_tooltip_lines(game, batch, &lines, mouse, hovered);
     }
 }
 
@@ -2076,9 +2105,7 @@ fn color_name(color: u32) -> String {
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
-    if form.background == Mode::Map {
-        draw_map_backdrop(game, batch, state);
-    }
+    draw_backdrop(game, batch, state);
     let size = [batch.width, batch.height];
     let mouse = game.cursor();
     let layout = look::waypoint_form(size, runtime::right_to_left());
@@ -2647,9 +2674,10 @@ fn world_camera(
 
 fn waypoint_distance_text(game:&Game<'_>,meters:f64) -> String {
     let limit=game.map_number("waypoint_km_at").unwrap_or(-1.);
-    let precision=usize::from(game.map_option("waypoint_dist_precision").unwrap_or(0));
-    if limit>=0. && meters>=limit {format!("{value:.precision$} km",value=meters/1000.)}
-    else {format!("{meters:.precision$} m")}
+    let precision=usize::from(game.map_option("waypoint_dist_precision").unwrap_or(1));
+    // Xaero's form: one decimal and the unit right after (`205.9m`).
+    if limit>=0. && meters>=limit {format!("{value:.precision$}km",value=meters/1000.)}
+    else {format!("{meters:.precision$}m")}
 }
 
 fn waypoint_label_left(x: f32, marker_width: f32, text_width: f32, viewport_width: f32) -> f32 {
@@ -3286,7 +3314,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     state.lod_elapsed += dt;
     if state.lod_elapsed >= 0.05 {
         state.lod_elapsed = 0.0;
-        if let Some(lod) = game.lod.as_ref() {
+        // Far terrain the game only estimates (its LOD) fills the map beyond what was explored;
+        // the maps show explored ground only unless asked.
+        if game.map_option("world_far_terrain") == Some(1)
+            && let Some(lod) = game.lod.as_ref()
+        {
             let _timing = runtime::profiling::measure("lod-snapshot-pick");
             state
                 .lod_sources
@@ -3369,9 +3401,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                     |wx, wz| biome_at(wx, wz),
                                 );
                                 let rgb = if water {
-                                    blend
-                                        .water
-                                        .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
+                                    multiply_color(
+                                        blend.water.unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base }),
+                                        leaves.as_ref().map_or(0xffffff, |p| p.water_texture),
+                                    )
                                 } else {
                                     leaf.and_then(|leaf| leaf.map_color(blend.grass, blend.foliage))
                                         .unwrap_or_else(|| {
@@ -3726,9 +3759,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                 let rgb = if redstone && base == 0 && !style.has(A::VANILLA) {
                                     0xad160a
                                 } else if water {
-                                    blend
-                                        .water
-                                        .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
+                                    multiply_color(
+                                        blend.water.unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base }),
+                                        leaves.as_ref().map_or(0xffffff, |p| p.water_texture),
+                                    )
                                 } else if style.has(A::VANILLA) {
                                     blend.grass.or(blend.foliage).unwrap_or(base)
                                 } else {
@@ -5672,7 +5706,7 @@ fn settings_items(game: &Game<'_>, state: &State) -> Vec<SettingsItem> {
         let name = game.translate(&setting.label).unwrap_or_else(|| setting.key.replace('_', " "));
         SettingsItem {
             label: format!("{name}: {}", setting_value(game, &setting.value)),
-            tooltip: setting.tooltip.as_ref().and_then(|key| game.translate(key)).or(Some(name)),
+            tooltip: setting.tooltip.as_ref().and_then(|key| game.translate(key)),
             slider: matches!(setting.value, Value::Range { .. }).then(|| setting.value.fraction()),
             swatch: if let Value::Color(rgb) = setting.value { Some(rgb) } else { None },
             target: SettingsTarget::Setting(i),
@@ -5773,7 +5807,17 @@ fn map_behind(state: &State) -> bool {
 /// The world map's terrain, darkened, behind a screen opened from it.
 fn draw_map_backdrop(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     draw(game, batch, state, rectangle(batch.width, batch.height), true, None);
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xa0101010);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], look::SCREEN_DIM);
+}
+
+/// What lies behind a screen: the darkened world map when it was opened from the map, else
+/// the blurred world darkened as vanilla darkens it.
+fn draw_backdrop(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    if map_behind(state) {
+        draw_map_backdrop(game, batch, state);
+    } else {
+        game.native_fill(batch, [0., 0., batch.width, batch.height], look::SCREEN_DIM);
+    }
 }
 
 /// Whether the open screen shows the world behind it, blurred as vanilla screens do.
@@ -5782,9 +5826,7 @@ pub(super) fn blurs_world(game: &Game<'_>) -> bool {
 }
 
 fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    if state.settings_return==Some(Mode::Map) {
-        draw_map_backdrop(game,batch,state);
-    }
+    draw_backdrop(game, batch, state);
     let size = [batch.width, batch.height];
     let rtl = runtime::right_to_left();
     let mouse = game.cursor();
@@ -5811,7 +5853,10 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             game.native_fill(batch, [at + 1., rect[1] + 6., 8., 8.], waypoint_argb(rgb));
         }
         if look::hit(mouse, rect) {
-            tooltip = item.tooltip.clone();
+            // A tooltip adds what the button cannot say: its description, or its whole label
+            // when the button cuts it; never the label it already shows.
+            let cut = fit_text(game, &item.label, rect[2] - 6.) != item.label;
+            tooltip = item.tooltip.clone().or_else(|| cut.then(|| item.label.clone())).map(|text| (text, rect));
         }
     }
     if pages > 1 {
@@ -5823,8 +5868,8 @@ fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     button(game, batch, back, &ui(if state.settings_tab.is_none() { "done" } else { "back" }), mouse, true);
     draw_notice(game, batch, state);
-    if let Some(text) = tooltip {
-        draw_tooltip(game, batch, &text, mouse);
+    if let Some((text, hovered)) = tooltip {
+        draw_tooltip(game, batch, &text, mouse, hovered);
     }
 }
 
@@ -5948,7 +5993,10 @@ fn reading_order<T: Clone>(parts: &[T]) -> Vec<T> {
 }
 
 /// A tooltip: one or more lines of segments, each with its own colour (keys are green).
-fn draw_tooltip_lines(game: &Game<'_>, batch: &mut HudBatch, lines: &[Vec<(String, u32)>], at: [f32; 2]) {
+/// A tooltip and the rect of what it describes, which it must leave visible.
+type Tip = (Vec<Vec<(String, u32)>>, [f32; 4]);
+
+fn draw_tooltip_lines(game: &Game<'_>, batch: &mut HudBatch, lines: &[Vec<(String, u32)>], at: [f32; 2], hovered: [f32; 4]) {
     if lines.is_empty() {
         return;
     }
@@ -5956,7 +6004,7 @@ fn draw_tooltip_lines(game: &Game<'_>, batch: &mut HudBatch, lines: &[Vec<(Strin
         .map(|line| line.iter().map(|(text, _)| game.map_text_width(text)).sum::<f32>())
         .fold(0., f32::max);
     let height = lines.len() as f32 * look::INFO_PITCH - 1.;
-    let rect = look::tooltip_box(at, [width, height], [batch.width, batch.height]);
+    let rect = look::tooltip_box(at, [width, height], [batch.width, batch.height], hovered);
     game.native_fill(batch, rect, look::TOOLTIP_BOX);
     let rtl = runtime::right_to_left();
     for (row, line) in lines.iter().enumerate() {
@@ -5969,8 +6017,8 @@ fn draw_tooltip_lines(game: &Game<'_>, batch: &mut HudBatch, lines: &[Vec<(Strin
     }
 }
 
-fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2]) {
-    draw_tooltip_lines(game, batch, &[vec![(text.to_owned(), look::TOOLTIP_TEXT)]], at);
+fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2], hovered: [f32; 4]) {
+    draw_tooltip_lines(game, batch, &[vec![(text.to_owned(), look::TOOLTIP_TEXT)]], at, hovered);
 }
 
 /// A bare glyph with its shadow one pixel down and right.
@@ -6053,7 +6101,7 @@ fn control_tooltip(game: &Game<'_>, state: &State, control: look::Control) -> Ve
     }
 }
 
-fn draw_world_controls(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Vec<Vec<(String, u32)>>> {
+fn draw_world_controls(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Tip> {
     let mut tooltip = None;
     for (control, cell) in world_controls(game, [batch.width, batch.height]) {
         let hovered = look::hit(mouse, cell);
@@ -6064,7 +6112,7 @@ fn draw_world_controls(game: &Game<'_>, batch: &mut HudBatch, state: &State, mou
         };
         draw_glyph(game, batch, look::glyph(control), cell, color);
         if hovered {
-            tooltip = Some(control_tooltip(game, state, control));
+            tooltip = Some((control_tooltip(game, state, control), cell));
         }
     }
     tooltip
@@ -6172,7 +6220,7 @@ fn draw_initial(game: &Game<'_>, batch: &mut HudBatch, square: [f32; 4], waypoin
     game.map_text(batch, letter, [(centre[0] - width * 0.5).round(), (centre[1] - 4.).round()], look::INITIAL_TEXT, true);
 }
 
-fn draw_mini_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Vec<Vec<(String, u32)>>> {
+fn draw_mini_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Tip> {
     if state.map_panel != MapPanel::Waypoints {
         return None;
     }
@@ -6203,7 +6251,7 @@ fn draw_mini_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
         let hovered = look::hit(mouse, row);
         row_text(game, batch, row, &point.name, if hovered { 0xFFFF_FFA0 } else { look::SCREEN_TEXT });
         if hovered {
-            tooltip = Some(vec![vec![(format!("{}, {}, {}", point.x, point.y, point.z), look::TOOLTIP_TEXT)]]);
+            tooltip = Some((vec![vec![(format!("{}, {}, {}", point.x, point.y, point.z), look::TOOLTIP_TEXT)]], row));
         }
     }
     if paged && let Some(row) = rows.next() {
@@ -6220,7 +6268,7 @@ fn draw_mini_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [
             let on = mini_toggle_on(game, state, toggle);
             let text = if toggle == look::MiniToggle::FullMenu { ui(mini_toggle_label(toggle)) }
                 else { format!("{}: {}", ui(mini_toggle_label(toggle)), ui(if on { "on" } else { "off" })) };
-            tooltip = Some(vec![vec![(text, look::TOOLTIP_TEXT)]]);
+            tooltip = Some((vec![vec![(text, look::TOOLTIP_TEXT)]], cell));
         }
     }
     tooltip
@@ -6371,8 +6419,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             lines.push((ui("approximate"), look::GREY_TEXT));
         }
         if let Some(waypoint)=waypoint_at_pointer(game,state,&frame.view,rect,mouse) {
-            tooltip=Some(vec![vec![(if game.map_option("waypoint_hide_coords")==Some(1) {waypoint.name.clone()}
-                else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)}, look::TOOLTIP_TEXT)]]);
+            let at = world_screen(&frame.view, rect, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
+            let (body, _) = look::pennant(at, game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32);
+            tooltip=Some((vec![vec![(if game.map_option("waypoint_hide_coords")==Some(1) {waypoint.name.clone()}
+                else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)}, look::TOOLTIP_TEXT)]],
+                [body[0], body[1], body[2], at[1] - body[1]]));
         }
     }
     if game.map_option("world_cave_ceiling")==Some(1)
@@ -6395,8 +6446,8 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     draw_menu(game, batch, state);
     draw_notice(game, batch, state);
-    if let Some(lines) = tooltip && state.info.is_none() && state.menu.is_none() {
-        draw_tooltip_lines(game, batch, &lines, mouse);
+    if let Some((lines, hovered)) = tooltip && state.info.is_none() && state.menu.is_none() {
+        draw_tooltip_lines(game, batch, &lines, mouse, hovered);
     }
     if let Some(info) = state.info {
         draw_information(game, batch, state, info);
