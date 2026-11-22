@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use mod_api::{self, Hooks, KeyRegistration, Registrar, RegistrationContext, SettingSpec};
+pub mod look;
 pub mod radar;
 pub mod map_claims;
 pub mod runtime;
