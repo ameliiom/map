@@ -130,7 +130,7 @@ macro_rules! define_tests {
                 controller.shutdown();
                 let saved = read_settings(&directory.join(SETTINGS_FILE)).unwrap();
                 assert!(saved.round);
-                assert_eq!(saved.blocks_per_pixel, 2.0);
+                assert_eq!(saved.blocks_per_pixel, 4.0);
                 assert_eq!(saved.corner, minimap::Corner::TopRight);
                 assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
                 let reopened = Controller::open(directory.clone());
