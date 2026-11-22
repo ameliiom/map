@@ -159,10 +159,10 @@ target = "horizon_client::game::Game::render_frame"
 helper = "src/render.rs"
 bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "self"}]
 
+
 [[native.mixin]]
-id = "waypoints-no-blur"
+id = "map-blur"
 kind = "HEAD"
-cancellable = true
 target = "horizon_client::game::native_hooks::client_services::Game::native_menu_background"
-helper = "src/menu_background.rs"
+helper = "src/blur.rs"
 bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "radius", ty = "&mut Option<f32>", value = "radius"}]

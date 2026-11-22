@@ -2,6 +2,7 @@
 // Engine adapter: this module is injected under game, never into the standalone library.
 use super::Game;
 use super::minimap_compat::MapAccess;
+use ::map::look;
 use runtime::{Language, language, tr};
 
 macro_rules! localized_format {
@@ -101,16 +102,23 @@ struct Target {
     z: i32,
 }
 
+/// The create / edit waypoint screen, also used to name a set.
 struct NameForm {
     text: String,
     color: u32,
     target: Option<Target>,
     rename: Option<Spot>,
     group: String,
-    group_focused: bool,
+    focus: Field,
     kind: MarkerMode,
     group_edit: Option<GroupEdit>,
     background: Mode,
+    dimension: Dimension,
+    /// x, y, z and yaw as typed.
+    coords: [String; 4],
+    initials: String,
+    show_3d: bool,
+    disabled: bool,
 }
 
 #[derive(Clone,Copy,Default)]
@@ -175,6 +183,8 @@ enum MenuAction {
     Information,
     RefreshClaims,
     TeleportPlayer,
+    OpenWaypoints,
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -467,9 +477,16 @@ struct State {
     map_focus: Option<Spot>,
     map_panel: MapPanel,
     map_panel_scroll: usize,
+    /// The mini-menu's filter, whether it has the keyboard, and whether a hop closes it.
+    mini_filter: String,
+    mini_filter_focus: bool,
+    close_on_hop: bool,
+    /// The last waypoint the hop control centred on.
+    hop: usize,
     map_settings_change: Option<(String, String)>,
     settings_return: Option<Mode>,
-    settings_tab: usize,
+    /// The settings category open, or none for the home page.
+    settings_tab: Option<usize>,
     settings_scroll: usize,
     /// Chunks the server sent since the last sampling pass. A waypoint's biome
     /// is sampled when its chunk arrives, rather than polling every point.
@@ -552,9 +569,13 @@ impl Default for State {
             map_focus: None,
             map_panel: MapPanel::None,
             map_panel_scroll: 0,
+            mini_filter: String::new(),
+            mini_filter_focus: false,
+            close_on_hop: true,
+            hop: 0,
             map_settings_change: None,
             settings_return: None,
-            settings_tab: 0,
+            settings_tab: None,
             settings_scroll: 0,
             biome_chunks: BTreeSet::new(),
             leaves: None,
@@ -706,128 +727,6 @@ fn portal_tint(kind: Portal) -> (u32, u8) {
     }
 }
 
-fn draw_icon(
-    game: &Game<'_>,
-    batch: &mut HudBatch,
-    at: [f32; 2],
-    rows: [&str; 16],
-    colors: [u32; 3],
-) {
-    for (y, row) in rows.iter().enumerate() {
-        let bytes = row.as_bytes();
-        let mut x = 0;
-        while x < bytes.len() {
-            let color = bytes[x];
-            let start = x;
-            while x < bytes.len() && bytes[x] == color {
-                x += 1;
-            }
-            if let Some(index) = color.checked_sub(b'1').filter(|i| *i < 3) {
-                game.native_fill(
-                    batch,
-                    [
-                        at[0] + start as f32,
-                        at[1] + y as f32,
-                        (x - start) as f32,
-                        1.0,
-                    ],
-                    colors[index as usize],
-                );
-            }
-        }
-    }
-}
-
-fn dimension_icon(game: &Game<'_>, batch: &mut HudBatch, dimension: Dimension, at: [f32; 2]) {
-    let (rows, colors) = match dimension {
-        Dimension::Player => (
-            [
-                "................",
-                ".......11.......",
-                "......1111......",
-                ".....111111.....",
-                "....11211211....",
-                "...1122112211...",
-                "..112221122211..",
-                ".11222211222211.",
-                ".......11.......",
-                ".......11.......",
-                ".......11.......",
-                ".......11.......",
-                "......2112......",
-                ".....222222.....",
-                "................",
-                "................",
-            ],
-            [0xffff6262, 0xffffffff, 0xffffffff],
-        ),
-        Dimension::Overworld => (
-            [
-                "................",
-                "................",
-                "..111111111111..",
-                ".11111111111111.",
-                ".11111111111111.",
-                ".22111221112212.",
-                ".22212222122222.",
-                ".22222222222222.",
-                ".22332222233222.",
-                ".22222232222222.",
-                ".22222222222222.",
-                ".23222222222322.",
-                "..222233222222..",
-                "....22222222....",
-                "......2222......",
-                "................",
-            ],
-            [0xff68b34a, 0xff93643d, 0xffbc8a54],
-        ),
-        Dimension::Nether => (
-            [
-                "................",
-                "..111111111111..",
-                "..111111111111..",
-                "..112222222211..",
-                "..112233222211..",
-                "..112333322211..",
-                "..112233222211..",
-                "..112222233211..",
-                "..112222333211..",
-                "..112222233211..",
-                "..112332222211..",
-                "..112233222211..",
-                "..112222222211..",
-                "..111111111111..",
-                "..111111111111..",
-                "................",
-            ],
-            [0xff44263f, 0xffb649cf, 0xffef9aff],
-        ),
-        Dimension::End => (
-            [
-                "................",
-                "................",
-                "......2222......",
-                "....22111122....",
-                "..221111111122..",
-                ".22111333311122.",
-                ".21113333331112.",
-                ".21133333333112.",
-                ".22113333331122.",
-                "..221133331122..",
-                "...2211111122...",
-                "....22211222....",
-                "......2222......",
-                ".......22.......",
-                "................",
-                "................",
-            ],
-            [0xffc6c78c, 0xff598f88, 0xff191d35],
-        ),
-    };
-    draw_icon(game, batch, at, rows, colors);
-}
-
 fn known_biome(game: &Game<'_>, dimension: Dimension, at: [i32; 3]) -> Option<String> {
     let player = game.native_player()?;
     if player.dimension != dimension.id()
@@ -843,32 +742,6 @@ fn known_biome(game: &Game<'_>, dimension: Dimension, at: [i32; 3]) -> Option<St
 
 fn localized_biome(id: &str) -> String {
     horizon_client::lang::get_or(&format!("biome.{}", id.replace(':', ".")), id)
-}
-
-fn biome_icon(game: &Game<'_>, batch: &mut HudBatch, biome: Option<&str>, at: [f32; 2]) {
-    let icon = runtime::biome_pictogram(biome);
-    for (y, row) in icon.rows.iter().enumerate() {
-        let mut x = 0;
-        while x < runtime::BIOME_ICON_SIZE {
-            let index = (row >> (x * 2)) & 3;
-            let start = x;
-            while x < runtime::BIOME_ICON_SIZE && (row >> (x * 2)) & 3 == index {
-                x += 1;
-            }
-            if index != 0 {
-                game.native_fill(
-                    batch,
-                    [
-                        at[0] + start as f32,
-                        at[1] + y as f32,
-                        (x - start) as f32,
-                        1.0,
-                    ],
-                    icon.colors[index as usize - 1],
-                );
-            }
-        }
-    }
 }
 
 // A small skull for automatic death waypoints, drawn from relative blocks so
@@ -979,57 +852,6 @@ fn highlight(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4],
     game.native_fill(batch, [left + width - line, top, line, height], 0xff000000);
 }
 
-fn draw_marker(
-    game: &Game<'_>,
-    batch: &mut HudBatch,
-    view: &View,
-    rect: [f32; 4],
-    at: [f64; 2],
-    player: &crate::game::native_hooks::NativePlayer,
-) {
-    let pixel = view.screen_at(at);
-    let x = rect[0] + pixel[0] as f32 * rect[2] / view.width as f32;
-    let y = rect[1] + pixel[1] as f32 * rect[3] / view.height as f32;
-    if !inside([x, y], rect) {
-        return;
-    }
-    let same_dimension = Dimension::from_id(player.dimension) == view.dimension;
-    let alpha = if view.large {255} else {u32::from(game.map_option("minimap_arrow_opacity").unwrap_or(100))*255/100};
-    let alpha = if same_dimension {alpha} else {alpha*3/4};
-    let border = (alpha<<24) | 0xf0f4fa;
-    let color_key = if view.large {"world_marker_color"} else {"minimap_marker_color"};
-    let fill = (alpha<<24) | if same_dimension {game.map_color_option(color_key).unwrap_or(0xff5050)} else {0x60a0ff};
-    let mode = if view.large {if game.map_option("world_marker_arrow")==Some(0) {1} else {2}}
-        else {game.map_option("minimap_marker_mode").unwrap_or(2)};
-    if mode!=2 {
-        let size=f32::from(game.map_option("minimap_marker_size").unwrap_or(2));
-        game.native_fill(batch,[x-size,y-size,size*2.,size*2.],border);
-        if mode==1 {game.native_fill(batch,[x-size+1.,y-size+1.,size*2.-2.,size*2.-2.],fill);}
-        else {
-            game.native_fill(batch,[x-size,y-0.5,size*2.,1.],fill);
-            game.native_fill(batch,[x-0.5,y-size,1.,size*2.],fill);
-        }
-        return;
-    }
-    let arrow_scale = if view.large {1.} else {game.map_number("minimap_arrow_scale").unwrap_or(1.5) as f32 / 1.5};
-    let forward = view.player_heading(f64::from(player.yaw), [rect[2], rect[3]]);
-    let right = [-forward[1], forward[0]];
-    for (size, color) in [(7.0*arrow_scale, border), (5.0*arrow_scale, fill)] {
-        let point = |along: f32, across: f32| {
-            [
-                x + size * (forward[0] * along + right[0] * across),
-                y + size * (forward[1] * along + right[1] * across),
-            ]
-        };
-        let tip = point(1.0, 0.0);
-        game.native_quad(
-            batch,
-            [tip, point(-0.65, 0.55), point(-0.65, -0.55), tip],
-            color,
-        );
-    }
-}
-
 fn first_letter(name: &str) -> char {
     name.chars()
         .find(|c| !c.is_whitespace())
@@ -1097,57 +919,45 @@ fn fit_text(game: &Game<'_>, text: &str, width: f32) -> String {
     out
 }
 
-fn draw_waypoint(
+/// A world-map waypoint: an opaque pennant of its colour with the initial and a diagonal drop
+/// shadow; a death point is a black pennant with a skull.
+fn draw_pennant(
     game: &Game<'_>,
     batch: &mut HudBatch,
     view: &View,
     rect: [f32; 4],
     waypoint: &Waypoint,
     letter: &str,
-    size: f32,
+    scale: f32,
 ) {
-    let pixel = view.screen_at([f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
-    let x = rect[0] + pixel[0] as f32 * rect[2] / view.width as f32;
-    let y = rect[1] + pixel[1] as f32 * rect[3] / view.height as f32;
-    if !inside([x, y], rect) {
+    let at = world_screen(view, rect, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
+    if !inside(at, rect) {
         return;
     }
-    let half = size / 2.0;
-    let width = if waypoint.icon == runtime::WaypointIcon::Letter {
-        size.max(game.map_text_width(letter) + 4.)
-    } else {
-        size
-    };
-    if !view.large || game.map_option("world_waypoint_backgrounds") != Some(0) {
-    game.native_fill(
-        batch,
-        [
-            x - width / 2. - 1.0,
-            y - half - 1.0,
-            width + 2.0,
-            size + 2.0,
-        ],
-        0xff101010,
-    );
-    game.native_fill(
-        batch,
-        [x - width / 2., y - half, width, size],
-        waypoint_argb(waypoint.color),
-    );
+    let skull = waypoint.icon == runtime::WaypointIcon::Skull;
+    let width = game.map_text_width(letter) * look::PENNANT_FONT;
+    let scale = scale.max(0.25) * ((width + 4.) / look::PENNANT[0]).max(1.);
+    let (body, [left, right, tip]) = look::pennant(at, scale);
+    let fill = if skull { look::DEATH_FILL } else { waypoint_argb(if waypoint.color == 0 { 0xffffff } else { waypoint.color }) };
+    let backgrounds = game.map_option("world_waypoint_backgrounds") != Some(0);
+    if backgrounds {
+        let o = look::PENNANT_SHADOW_OFFSET * scale;
+        let shift = |p: [f32; 2]| [p[0] + o, p[1] + o];
+        game.native_fill(batch, [body[0] + o, body[1] + o, body[2], body[3]], look::PENNANT_SHADOW);
+        game.native_quad(batch, [shift(left), shift(right), shift(tip), shift(left)], look::PENNANT_SHADOW);
+        game.native_fill(batch, body, fill);
+        game.native_quad(batch, [left, right, tip, left], fill);
     }
-    if waypoint.icon == runtime::WaypointIcon::Skull {
-        draw_skull(game, batch, [x, y], size * 0.95);
+    let centre = [body[0] + body[2] * 0.5, body[1] + body[3] * 0.5];
+    if skull {
+        draw_skull(game, batch, centre, body[2] * 0.7);
         return;
     }
-    game.map_text(
-        batch,
-        &letter,
-        [x - game.map_text_width(&letter) / 2.0, y - 4.0],
-        if view.large && game.map_option("world_waypoint_backgrounds")==Some(0) {
-            waypoint_argb(if waypoint.color==0 {0xffffff}else{waypoint.color})
-        } else if waypoint.color == 0 { 0xffffffff } else { 0xff201800 },
-        false,
-    );
+    let color = if backgrounds { look::INITIAL_TEXT } else { fill };
+    let origin = [(centre[0] - width * 0.5).round(), (centre[1] - 4. * look::PENNANT_FONT).round()];
+    let first = batch.vertices.len();
+    game.map_text(batch, letter, origin, color, true);
+    batch.scale_since(first, origin[0], origin[1], look::PENNANT_FONT, look::PENNANT_FONT);
 }
 
 fn draw_portal_marker(
@@ -1248,10 +1058,6 @@ fn hovered_column(game: &Game<'_>, layer: Layer, block: [i32; 2]) -> Option<Colu
     Some(ColumnInfo { height, fluid })
 }
 
-const MENU_HEADER: f32 = 19.0;
-const MENU_SUBLINE: f32 = 14.0;
-const MENU_ROW: f32 = 15.0;
-const MENU_PAD: f32 = 4.0;
 
 fn teleport_allowed(game: &Game<'_>) -> bool {
     game.ui.registries.permission >= 2 && game.map_option("map_teleport_allowed") != Some(0)
@@ -1356,251 +1162,6 @@ fn portal_target_text(target: PortalTarget) -> String {
     }
 }
 
-fn menu_title(menu: Menu) -> String {
-    match menu.height {
-        Some(y) => {
-            let bottom = menu.fluid.map_or_else(String::new, |fluid| {
-                localized_format!(
-                    " (bottom {})",
-                    " (дно {})",
-                    " (fond {})",
-                    " (fondo {})",
-                    " (Grund {})",
-                    fluid.bottom
-                )
-            });
-            format!(
-                "X: {}  Y: {}{}{}  Z: {}",
-                menu.block[0],
-                if menu.height_approximate { "≈" } else { "" },
-                y,
-                bottom,
-                menu.block[1]
-            )
-        }
-        None => format!("X: {}  Z: {}", menu.block[0], menu.block[1]),
-    }
-}
-
-fn menu_subtitle(
-    game:&Game<'_>,
-    state: &State,
-    menu: Menu,
-    player: &crate::game::native_hooks::NativePlayer,
-) -> Option<String> {
-    let portal=menu.portal.map(|kind| {
-        let target = portal_target(state, menu, player.y.floor() as i32);
-        format!(
-            "{} → {}",
-            portal_label(kind),
-            target.map_or_else(
-                || tr(
-                    "unknown destination",
-                    "назначение неизвестно",
-                    "destination inconnue",
-                    "destino desconocido",
-                    "Unbekanntes Ziel"
-                )
-                .to_owned(),
-                portal_target_text
-            )
-        )
-    });
-    let local=Dimension::from_id(player.dimension);
-    if game.map_option("world_map_distances")!=Some(1) || local!=menu.dimension {
-        return portal;
-    }
-    let dx=f64::from(menu.block[0])+0.5-player.x;
-    let dz=f64::from(menu.block[1])+0.5-player.z;
-    let y=menu.waypoint.and_then(|spot|state.waypoints.iter().find(|point|point.key()==spot.key))
-        .filter(|point|!point.options.unspecified_height).map(|point|f64::from(point.y)-player.y);
-    let meters=dx.hypot(dz).hypot(y.unwrap_or(0.));
-    let limit=game.map_number("world_map_km_at").unwrap_or(-1.);
-    let precision=usize::from(game.map_option("world_map_dist_precision").unwrap_or_default());
-    let distance=if limit>=0. && meters>=limit {
-        format!("{km:.precision$} km",km=meters/1000.)
-    } else {
-        format!("{meters:.precision$} m")
-    };
-    Some(portal.map_or_else(||distance.clone(),|portal|format!("{portal} · {distance}")))
-}
-
-fn menu_items(
-    game: &Game<'_>,
-    menu: Menu,
-    target: Option<PortalTarget>,
-    show_3d: bool,
-) -> Vec<(&'static str, MenuAction)> {
-    let mut items = vec![
-        (
-            tr(
-                "Chunk and region information",
-                "Информация о чанке и регионе",
-                "Informations sur le chunk et la région",
-                "Información del chunk y la región",
-                "Chunk- und Regionsinformationen",
-            ),
-            MenuAction::Information,
-        ),
-        (
-            tr(
-                "Copy coordinates",
-                "Скопировать координаты",
-                "Copier les coordonnées",
-                "Copiar coordenadas",
-                "Koordinaten kopieren",
-            ),
-            MenuAction::Copy,
-        ),
-        (
-            tr(
-                "Create waypoint",
-                "Поставить вейпоинт",
-                "Créer un repère",
-                "Crear marcador",
-                "Wegpunkt erstellen",
-            ),
-            MenuAction::Waypoint,
-        ),
-        (
-            tr(
-                "Export explored map as PNG",
-                "Экспортировать карту в PNG",
-                "Exporter la carte en PNG",
-                "Exportar el mapa a PNG",
-                "Karte als PNG exportieren",
-            ),
-            MenuAction::ExportPng,
-        ),
-    ];
-    if menu.portal.is_some() && matches!(target, Some(PortalTarget::Exact { .. })) {
-        items.push((
-            tr(
-                "Copy destination coordinates",
-                "Скопировать координаты назначения",
-                "Copier les coordonnées de destination",
-                "Copiar coordenadas del destino",
-                "Zielkoordinaten kopieren",
-            ),
-            MenuAction::CopyDestination,
-        ));
-    }
-    if menu.waypoint.is_some() {
-        items.push((
-            tr("Edit waypoint","Изменить метку","Modifier le repère","Editar marcador","Wegpunkt bearbeiten"),
-            MenuAction::EditWaypoint,
-        ));
-        items.push((
-            tr(
-                "Delete waypoint",
-                "Удалить вейпоинт",
-                "Supprimer le repère",
-                "Eliminar marcador",
-                "Wegpunkt löschen",
-            ),
-            MenuAction::DeleteWaypoint,
-        ));
-        items.push((
-            if show_3d {
-                tr(
-                    "Hide in 3D world",
-                    "Скрыть в 3D-мире",
-                    "Masquer dans le monde 3D",
-                    "Ocultar en el mundo 3D",
-                    "In 3D-Welt ausblenden",
-                )
-            } else {
-                tr(
-                    "Show in 3D world",
-                    "Показать в 3D-мире",
-                    "Afficher dans le monde 3D",
-                    "Mostrar en el mundo 3D",
-                    "In 3D-Welt zeigen",
-                )
-            },
-            MenuAction::Toggle3D,
-        ));
-    }
-    if official_smp(game) {
-        items.push((tr("Refresh my claims", "Обновить свои приваты", "Actualiser mes claims",
-            "Actualizar mis parcelas", "Eigene Claims aktualisieren"), MenuAction::RefreshClaims));
-    }
-    if teleport_allowed(game) {
-        if menu.radar_player.is_some() {
-            items.push((tr("Teleport to player", "Телепортироваться к игроку", "Se téléporter au joueur",
-                "Teletransportar al jugador", "Zum Spieler teleportieren"), MenuAction::TeleportPlayer));
-        }
-        if menu.portal.is_some() {
-            if matches!(target, Some(PortalTarget::Exact { .. })) {
-                items.push((
-                    tr(
-                        "Teleport to portal",
-                        "Телепортироваться к порталу",
-                        "Se téléporter au portail",
-                        "Teletransportarse al portal",
-                        "Zum Portal teleportieren",
-                    ),
-                    MenuAction::TeleportDestination,
-                ));
-            }
-        } else {
-            items.push((
-                tr(
-                    "Teleport here",
-                    "Телепортироваться туда",
-                    "Se téléporter ici",
-                    "Teletransportarse aquí",
-                    "Hierher teleportieren",
-                ),
-                MenuAction::Teleport,
-            ));
-        }
-    }
-    items.push((
-        tr(
-            "Import Xaero waypoints",
-            "Импорт меток Xaero",
-            "Importer les repères Xaero",
-            "Importar marcadores de Xaero",
-            "Xaero-Wegpunkte importieren",
-        ),
-        MenuAction::ImportXaero,
-    ));
-    items.push((
-        tr(
-            "Import Xaero map cache",
-            "Импорт кеша карты Xaero",
-            "Importer le cache cartographique Xaero",
-            "Importar la caché de Xaero",
-            "Xaero-Kartencache importieren",
-        ),
-        MenuAction::ImportXaeroCache,
-    ));
-    items.push((
-        tr("Import Xaero settings", "Импорт настроек Xaero", "Importer les réglages Xaero",
-            "Importar ajustes de Xaero", "Xaero-Einstellungen importieren"),
-        MenuAction::ImportXaeroSettings,
-    ));
-    items.push((
-        tr("Temporary waypoint", "Временная метка", "Repère temporaire", "Marcador temporal", "Temporärer Wegpunkt"),
-        MenuAction::TemporaryWaypoint,
-    ));
-    items.push((
-        tr("Destination", "Точка назначения", "Destination", "Destino", "Zielpunkt"),
-        MenuAction::DestinationWaypoint,
-    ));
-    items.push((
-        tr("Reload radar rules", "Загрузить правила радара", "Recharger les règles du radar",
-            "Recargar reglas del radar", "Radarregeln neu laden"),
-        MenuAction::ReloadRadarRules,
-    ));
-    items.push((
-        tr("Next Xaero profile","Следующий профиль Xaero","Profil Xaero suivant","Siguiente perfil Xaero","Nächstes Xaero-Profil"),
-        MenuAction::NextXaeroProfile,
-    ));
-    items
-}
-
 /// Whether the waypoint under the pointer is shown in the 3D world; defaults to
 /// true for a point no longer in the current snapshot.
 fn waypoint_show_3d(state: &State, spot: Spot) -> bool {
@@ -1611,54 +1172,6 @@ fn waypoint_show_3d(state: &State, spot: Spot) -> bool {
             waypoint.key() == spot.key
         })
         .map_or(true, |waypoint| waypoint.show_3d)
-}
-
-fn menu_layout(
-    game: &Game<'_>,
-    size: [f32; 2],
-    menu: Menu,
-    subtitle: Option<&str>,
-    items: &[(&'static str, MenuAction)],
-) -> ([f32; 4], Vec<[f32; 4]>) {
-    let mut width = game.map_text_width(&menu_title(menu));
-    if let Some(subtitle) = subtitle {
-        width = width.max(game.map_text_width(subtitle));
-    }
-    for (label, _) in items {
-        width = width.max(game.map_text_width(label));
-    }
-    let width = (width + 18.0).clamp(160.0, 340.0);
-    let header = MENU_HEADER
-        + if subtitle.is_some() {
-            MENU_SUBLINE
-        } else {
-            0.0
-        };
-    let height = header + items.len() as f32 * MENU_ROW + MENU_PAD;
-    let x = if menu.at[0] + width > size[0] - 6.0 {
-        size[0] - width - 6.0
-    } else {
-        menu.at[0]
-    }
-    .max(6.0);
-    let y = if menu.at[1] + height > size[1] - 6.0 {
-        size[1] - height - 6.0
-    } else {
-        menu.at[1]
-    }
-    .max(6.0);
-    let rect = [x, y, width, height];
-    let rows = (0..items.len())
-        .map(|index| {
-            [
-                rect[0] + 4.0,
-                rect[1] + header + index as f32 * MENU_ROW,
-                rect[2] - 8.0,
-                MENU_ROW,
-            ]
-        })
-        .collect();
-    (rect, rows)
 }
 
 fn teleport_command(dimension: Dimension, at: [i32; 3], from: Dimension) -> String {
@@ -1790,6 +1303,11 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
             }
         }
         MenuAction::ExportPng => export_map_png(game,state,menu.dimension),
+        MenuAction::OpenWaypoints => {
+            state.mode = Mode::Waypoints;
+            state.waypoint_scroll = 0;
+        }
+        MenuAction::OpenSettings => open_settings(state, Some(Mode::Map), None),
         MenuAction::Information => {
             state.info = Some(menu);
             state.info_scroll = 0;
@@ -1815,21 +1333,12 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 y,
                 z: menu.block[1],
             };
-            state.name_form = Some(NameForm {
-                text: default_waypoint_name(state),
-                color: default_waypoint_color(state),
-                target: Some(target),
-                rename: None,
-                group: state.waypoint_group.clone().unwrap_or_default(),
-                group_focused: false,
-                kind: match action {
-                    MenuAction::TemporaryWaypoint => MarkerMode::Temporary,
-                    MenuAction::DestinationWaypoint => MarkerMode::Destination,
-                    _ => MarkerMode::Saved,
-                },
-                group_edit: None,
-                background: Mode::Map,
-            });
+            let kind = match action {
+                MenuAction::TemporaryWaypoint => MarkerMode::Temporary,
+                MenuAction::DestinationWaypoint => MarkerMode::Destination,
+                _ => MarkerMode::Saved,
+            };
+            state.name_form = Some(NameForm::new(state, kind, Mode::Map).at(target));
             state.mode = Mode::Name;
             runtime::set_text_input(true);
         }
@@ -2072,69 +1581,138 @@ fn poll_cache_import(state: &mut State) {
     state.notice = Some((message, Instant::now()));
 }
 
-fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    let Some(menu) = state.menu else {
-        return;
-    };
-    let Some(player) = game.native_player() else {
-        return;
-    };
-    let subtitle = menu_subtitle(game,state,menu,&player);
-    let has_subtitle = subtitle.is_some();
+/// One row of the right-click menu: a grey fact, or an action with an optional key name.
+struct MenuRow {
+    label: String,
+    action: Option<MenuAction>,
+    key: Option<String>,
+}
+
+fn menu_rows(game: &Game<'_>, state: &State, menu: Menu, player: &crate::game::native_hooks::NativePlayer) -> Vec<MenuRow> {
+    let fact = |label: String| MenuRow { label, action: None, key: None };
+    let act = |key: &str, action: MenuAction| MenuRow { label: ui(key), action: Some(action), key: None };
+    let (chunk, region) = maps::chunk_region(menu.block);
+    let mut rows = vec![
+        fact(format!("C: ({};{}):({};{})", chunk[0], chunk[1], region[0], region[1])),
+        fact(match menu.height {
+            Some(y) => format!("X: {}, Y: {}{}, Z: {}", menu.block[0], if menu.height_approximate { "≈" } else { "" }, y, menu.block[1]),
+            None => format!("X: {}, Z: {}", menu.block[0], menu.block[1]),
+        }),
+    ];
     let target = portal_target(state, menu, player.y.floor() as i32);
-    let show_3d = menu
-        .waypoint
-        .map_or(true, |spot| waypoint_show_3d(state, spot));
-    let items = menu_items(game, menu, target, show_3d);
-    let (rect, rows) = menu_layout(
-        game,
-        [batch.width, batch.height],
-        menu,
-        subtitle.as_deref(),
-        &items,
-    );
-    let mouse = game.cursor();
-    let border = 0xff3a4553;
-    game.native_fill(batch, rect, 0xf01b2028);
-    game.native_fill(batch, [rect[0], rect[1], rect[2], 1.0], border);
-    game.native_fill(
-        batch,
-        [rect[0], rect[1] + rect[3] - 1.0, rect[2], 1.0],
-        border,
-    );
-    game.native_fill(batch, [rect[0], rect[1], 1.0, rect[3]], border);
-    game.native_fill(
-        batch,
-        [rect[0] + rect[2] - 1.0, rect[1], 1.0, rect[3]],
-        border,
-    );
-    game.map_text(
-        batch,
-        &menu_title(menu),
-        [rect[0] + 8.0, rect[1] + 5.0],
-        0xffffff,
-        true,
-    );
-    if let Some(subtitle) = subtitle.as_deref() {
-        game.map_text(
-            batch,
-            subtitle,
-            [rect[0] + 8.0, rect[1] + MENU_HEADER - 3.0],
-            0xd8b0ff,
-            false,
-        );
+    if let Some(kind) = menu.portal {
+        rows.push(fact(format!("{} → {}", portal_label(kind),
+            target.map_or_else(|| ui("unknown_destination"), portal_target_text))));
     }
-    let header = MENU_HEADER + if has_subtitle { MENU_SUBLINE } else { 0.0 };
-    game.native_fill(
-        batch,
-        [rect[0] + 4.0, rect[1] + header - 1.0, rect[2] - 8.0, 1.0],
-        border,
-    );
-    for ((label, _), row) in items.iter().zip(rows) {
-        if inside(mouse, row) {
-            game.native_fill(batch, row, 0xff2e3a48);
+    rows.push(act("create_waypoint", MenuAction::Waypoint));
+    rows.push(MenuRow {
+        key: key_name(game, "instant_waypoint", "key.keyboard.unknown"),
+        ..act("temporary_waypoint", MenuAction::TemporaryWaypoint)
+    });
+    rows.push(act("destination", MenuAction::DestinationWaypoint));
+    if menu.waypoint.is_some() {
+        let show_3d = menu.waypoint.map_or(true, |spot| waypoint_show_3d(state, spot));
+        rows.push(act("edit_waypoint", MenuAction::EditWaypoint));
+        rows.push(act("delete_waypoint", MenuAction::DeleteWaypoint));
+        rows.push(act(if show_3d { "hide_in_world" } else { "show_in_world" }, MenuAction::Toggle3D));
+    }
+    if teleport_allowed(game) {
+        if menu.radar_player.is_some() {
+            rows.push(act("teleport_to_player", MenuAction::TeleportPlayer));
         }
-        game.map_text(batch, label, [row[0] + 7.0, row[1] + 4.0], 0xdddddd, false);
+        if menu.portal.is_some() {
+            if matches!(target, Some(PortalTarget::Exact { .. })) {
+                rows.push(act("teleport_to_portal", MenuAction::TeleportDestination));
+            }
+        } else {
+            rows.push(act("teleport_here", MenuAction::Teleport));
+        }
+    }
+    if menu.portal.is_some() && matches!(target, Some(PortalTarget::Exact { .. })) {
+        rows.push(act("copy_destination", MenuAction::CopyDestination));
+    }
+    rows.push(act("copy_location", MenuAction::Copy));
+    rows.push(act("chunk_info", MenuAction::Information));
+    if official_smp(game) {
+        rows.push(act("refresh_claims", MenuAction::RefreshClaims));
+    }
+    rows.push(MenuRow {
+        key: key_name(game, runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT),
+        ..act("open_waypoints", MenuAction::OpenWaypoints)
+    });
+    rows.push(act("export_png", MenuAction::ExportPng));
+    rows.push(MenuRow {
+        key: key_name(game, "map_settings", "key.keyboard.y"),
+        ..act("open_settings", MenuAction::OpenSettings)
+    });
+    if let Some(distance) = menu_distance(game, state, menu, player) {
+        rows.push(fact(distance));
+    }
+    rows
+}
+
+/// The distance from the player to the clicked point, when both are in one dimension.
+fn menu_distance(game: &Game<'_>, state: &State, menu: Menu, player: &crate::game::native_hooks::NativePlayer) -> Option<String> {
+    if Dimension::from_id(player.dimension) != menu.dimension {
+        return None;
+    }
+    let dx = f64::from(menu.block[0]) + 0.5 - player.x;
+    let dz = f64::from(menu.block[1]) + 0.5 - player.z;
+    let y = menu.waypoint.and_then(|spot| state.waypoints.iter().find(|point| point.key() == spot.key))
+        .filter(|point| !point.options.unspecified_height).map(|point| f64::from(point.y) - player.y)
+        .or_else(|| menu.height.map(|y| f64::from(y) - player.y));
+    let meters = dx.hypot(dz).hypot(y.unwrap_or(0.));
+    let limit = game.map_number("world_map_km_at").unwrap_or(-1.);
+    let precision = usize::from(game.map_option("world_map_dist_precision").unwrap_or(1)).max(1);
+    Some(if limit >= 0. && meters >= limit {
+        format!("{km:.precision$}km", km = meters / 1000.)
+    } else {
+        format!("{meters:.precision$}m")
+    })
+}
+
+fn menu_layout(size: [f32; 2], menu: Menu, rows: usize) -> ([f32; 4], [f32; 4], Vec<[f32; 4]>) {
+    look::context_menu(menu.at, rows, size)
+}
+
+fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    let Some(menu) = state.menu else { return };
+    let Some(player) = game.native_player() else { return };
+    let rows = menu_rows(game, state, menu, &player);
+    let (outer, title, rects) = menu_layout([batch.width, batch.height], menu, rows.len());
+    let mouse = game.cursor();
+    let line = look::MENU_LINE;
+    for edge in [
+        [outer[0], outer[1], outer[2], line],
+        [outer[0], outer[1] + outer[3] - line, outer[2], line],
+        [outer[0], outer[1] + line, line, outer[3] - 2. * line],
+        [outer[0] + outer[2] - line, outer[1] + line, line, outer[3] - 2. * line],
+    ] {
+        game.native_fill(batch, edge, look::MENU_BORDER);
+    }
+    let centred = |game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], parts: &[(String, u32)]| {
+        let width: f32 = parts.iter().map(|(text, _)| game.map_text_width(text)).sum();
+        let mut x = (rect[0] + (rect[2] - width) * 0.5).round();
+        for (text, color) in reading_order(parts) {
+            draw_text(game, batch, &text, [x, rect[1] + 1.], color, true);
+            x += game.map_text_width(&text);
+        }
+    };
+    game.native_fill(batch, title, look::MENU_TITLE);
+    centred(game, batch, title, &[(ui("choose_option"), look::SCREEN_TEXT)]);
+    let mut above = title;
+    for (row, rect) in rows.iter().zip(rects) {
+        game.native_fill(batch, [rect[0], above[1] + above[3], rect[2], line], look::MENU_SEPARATOR);
+        let hovered = row.action.is_some() && look::hit(mouse, rect);
+        game.native_fill(batch, rect, if hovered { look::MENU_HOVER } else { look::MENU_ROW });
+        let key = row.key.as_ref().map(|key| format!(" ({key})"));
+        let room = rect[2] - 6. - key.as_ref().map_or(0., |key| game.map_text_width(key));
+        let mut parts = vec![(fit_text(game, &row.label, room), if row.action.is_some() { look::SCREEN_TEXT } else { look::GREY_TEXT })];
+        if let Some(key) = key {
+            parts.push((key, look::KEY_TEXT));
+        }
+        centred(game, batch, rect, &parts);
+        above = rect;
     }
 }
 
@@ -2165,43 +1743,14 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         return;
     }
     let width = game.map_text_width(text);
-    let x = (batch.width - width) / 2.0;
+    let x = ((batch.width - width) / 2.0).round();
     let y = batch.height - 38.0;
-    game.native_fill(batch, [x - 7.0, y - 4.0, width + 14.0, 14.0], 0xd01b2028);
-    game.map_text(batch, text, [x, y], 0xffffd24a, true);
-}
-
-fn button(
-    game: &Game<'_>,
-    batch: &mut HudBatch,
-    rect: [f32; 4],
-    label: &str,
-    mouse: [f32; 2],
-    enabled: bool,
-) {
-    let color = if !enabled {
-        0xff232a33
-    } else if inside(mouse, rect) {
-        0xff3a4a5c
-    } else {
-        0xff2a3542
-    };
-    game.native_fill(batch, rect, color);
-    let text_color = if enabled { 0xffffff } else { 0x707880 };
-    game.map_text(
-        batch,
-        label,
-        [
-            rect[0] + (rect[2] - game.map_text_width(label)) / 2.0,
-            rect[1] + 4.0,
-        ],
-        text_color,
-        false,
-    );
+    game.native_fill(batch, [x - 3.0, y - 2.0, width + 6.0, 12.0], look::TOOLTIP_BOX);
+    game.map_text(batch, text, [x, y], look::SCREEN_TEXT, true);
 }
 
 fn waypoint_visible_rows(height: f32) -> usize {
-    (((height - 127.0) / 36.0).floor() as usize).clamp(1, 18)
+    look::waypoint_rows(height)
 }
 
 fn shown_waypoints(state: &State) -> impl DoubleEndedIterator<Item = (usize, &Waypoint)> {
@@ -2216,31 +1765,11 @@ fn map_waypoint_visible(game: &Game<'_>, state: &State, point: &Waypoint) -> boo
         || state.waypoint_group.as_ref().is_none_or(|group| *group == point.options.group))
 }
 
-fn waypoint_group_buttons(width: f32) -> [[f32;4];4] {
-    let cell = ((width-36.)/4.).clamp(1.,150.);
-    [
-        [width-cell-12.,29.,cell,17.],
-        [12.,29.,cell,17.],
-        [16.+cell,29.,cell,17.],
-        [20.+2.*cell,29.,cell,17.],
-    ]
-}
-
-fn waypoint_header(width:f32)->[[f32;4];3] {
-    let w=((width-34.)/3.).clamp(1.,120.);
-    [[width-3.*w-20.,6.,w,18.],[width-2.*w-16.,6.,w,18.],[width-w-12.,6.,w,18.]]
-}
-
-fn waypoint_filters(width:f32)->[[f32;4];3] {
-    let w=((width-32.)/4.).clamp(1.,151.);
-    [[12.,51.,(width-32.-2.*w).max(1.),18.],[width-2.*w-16.,51.,w,18.],[width-w-12.,51.,w,18.]]
-}
-
-fn group_label(group:Option<&str>)->&str {
+fn group_label(group:Option<&str>)->String {
     match group {
-        None=>tr("All groups","Все группы","Tous les groupes","Todos los grupos","Alle Gruppen"),
-        Some("")=>tr("Default group","Основная группа","Groupe par défaut","Grupo predeterminado","Standardgruppe"),
-        Some(name)=>name,
+        None=>ui("all_sets"),
+        Some("")=>ui("default_set"),
+        Some(name)=>name.to_owned(),
     }
 }
 
@@ -2249,13 +1778,36 @@ fn waypoint_groups(game:&Game<'_>,state:&State)->Vec<Option<String>> {
     std::iter::once(None).chain(groups.into_iter().map(Some)).collect()
 }
 
-fn visible_group_rows(height:f32)->usize {
-    (((height-98.)/20.).floor() as usize).clamp(1,9)
+/// A row of the set dropdown.
+#[derive(Clone, PartialEq)]
+enum SetRow {
+    Select(Option<String>),
+    Rename(String),
+    DeleteEmpty(String),
 }
 
-fn group_row(width:f32,index:usize)->[f32;4] {
-    let selector=waypoint_group_buttons(width)[0];
-    [selector[0],selector[1]+selector[3]+2.+20.*index as f32,selector[2],19.]
+/// The set dropdown's rows under the set bar, as many as fit above the actions.
+fn set_rows(game: &Game<'_>, state: &State, bar: [f32; 4], bottom: f32) -> Vec<(SetRow, [f32; 4])> {
+    let mut rows: Vec<SetRow> = waypoint_groups(game, state).into_iter().map(SetRow::Select).collect();
+    if let Some(name) = state.waypoint_group.as_ref().filter(|name| !name.is_empty()) {
+        rows.push(SetRow::Rename(name.clone()));
+        if shown_waypoints(state).next().is_none() {
+            rows.push(SetRow::DeleteEmpty(name.clone()));
+        }
+    }
+    let fit = (((bottom - bar[1] - bar[3]) / bar[3]).floor().max(1.)) as usize;
+    let start = state.waypoint_groups_scroll.min(rows.len().saturating_sub(fit));
+    rows.into_iter().skip(start).take(fit).enumerate()
+        .map(|(i, row)| (row, [bar[0], bar[1] + bar[3] * (i + 1) as f32, bar[2], bar[3]]))
+        .collect()
+}
+
+fn set_row_label(row: &SetRow) -> String {
+    match row {
+        SetRow::Select(group) => group_label(group.as_deref()),
+        SetRow::Rename(_) => ui("rename_set"),
+        SetRow::DeleteEmpty(_) => ui("delete_empty_set"),
+    }
 }
 
 fn listed_waypoints<'a>(game:&Game<'_>,state:&'a State) -> Vec<(usize,&'a Waypoint)> {
@@ -2278,30 +1830,15 @@ fn listed_waypoints<'a>(game:&Game<'_>,state:&'a State) -> Vec<(usize,&'a Waypoi
     points
 }
 
-fn visible_waypoint_rows<'a>(game:&Game<'_>,state:&'a State,width:f32,height:f32) -> impl Iterator<Item=(usize,&'a Waypoint,[f32;4])> {
-    let points=listed_waypoints(game,state);
-    let count=waypoint_visible_rows(height);
-    let start=state.waypoint_scroll.min(points.len().saturating_sub(count));
-    points.into_iter().skip(start).take(count).enumerate()
-        .map(move |(row,(index,point))| (index,point,[12.,74.+row as f32*36.,(width-24.).max(1.),35.]))
-}
-
-/// The clickable 3D-visibility toggle at the right end of a waypoint row.
-fn waypoint_3d_rect(row: [f32; 4]) -> [f32; 4] {
-    [row[0] + row[2] - 24.0, row[1] + 10.0, 20.0, 18.0]
-}
-
-// Shared by drawing and hit testing, including narrow GUI viewports.
-fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 5] {
-    let button_width = ((width - 48.0) / 5.0).max(1.0);
-    std::array::from_fn(|i| {
-        [
-            12.0 + i as f32 * (button_width + 6.0),
-            height - 42.0,
-            button_width,
-            18.0,
-        ]
-    })
+/// The waypoint list's layout and the rows it shows now.
+fn waypoint_screen<'a>(game: &Game<'_>, state: &'a State, size: [f32; 2]) -> (look::WaypointList, Vec<(usize, &'a Waypoint, [f32; 4])>) {
+    let points = listed_waypoints(game, state);
+    let count = look::waypoint_rows(size[1]);
+    let start = state.waypoint_scroll.min(points.len().saturating_sub(count));
+    let list = look::waypoint_list(size, points.len().saturating_sub(start).min(count), runtime::right_to_left());
+    let rows = points.into_iter().skip(start).zip(list.rows.iter().copied())
+        .map(|((index, point), row)| (index, point, row)).collect();
+    (list, rows)
 }
 
 fn selected_waypoint(state: &State) -> Option<&Waypoint> {
@@ -2342,381 +1879,232 @@ fn apply_map_focus(state: &mut State, large: bool, selected: Dimension) {
     }
 }
 
+fn sort_label(sort: usize) -> String {
+    ui(match sort { 1 => "sort_name", 2 => "sort_distance", _ => "sort_added" })
+}
+
+fn dimension_filter_label(dimension: Dimension) -> String {
+    if dimension == Dimension::Player { ui("all_dimensions") } else { dimension.label().to_owned() }
+}
+
+/// A waypoint's distance and place, for its row's tooltip.
+fn waypoint_details(game: &Game<'_>, point: &Waypoint) -> Vec<Vec<(String, u32)>> {
+    let mut lines = Vec::new();
+    if let Some(player) = game.native_player()
+        && point.dimension == Dimension::from_id(player.dimension)
+    {
+        let dy = if point.options.unspecified_height { 0. } else { f64::from(point.y) - player.y };
+        let meters = (f64::from(point.x) + 0.5 - player.x).hypot(f64::from(point.z) + 0.5 - player.z).hypot(dy);
+        lines.push(vec![(waypoint_distance_text(game, meters), look::TOOLTIP_TEXT)]);
+    }
+    if game.map_option("waypoint_hide_coords") != Some(1) {
+        let y = if point.options.unspecified_height { "~".to_owned() } else { point.y.to_string() };
+        lines.push(vec![
+            (format!("{} · ", point.dimension.label()), look::GREY_TEXT),
+            (format!("{}, {y}, {}", point.x, point.z), look::GREY_TEXT),
+        ]);
+    }
+    lines
+}
+
 fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0xa611151b);
-    game.map_text(
-        batch,
-        tr(
-            "Waypoints",
-            "Вейпоинты",
-            "Repères",
-            "Marcadores",
-            "Wegpunkte",
-        ),
-        [12.0, 8.0],
-        0xffffff,
-        true,
-    );
+    let size = [batch.width, batch.height];
     let mouse = game.cursor();
-    let [options,create,back]=waypoint_header(batch.width);
-    button(game,batch,options,tr("Settings","Настройки","Options","Opciones","Optionen"),mouse,true);
-    button(
-        game,
-        batch,
-        create,
-        tr(
-            "Create here",
-            "Создать здесь",
-            "Créer ici",
-            "Crear aquí",
-            "Hier erstellen",
-        ),
-        mouse,
-        true,
-    );
-    button(
-        game,
-        batch,
-        back,
-        tr("Back", "Назад", "Retour", "Volver", "Zurück"),
-        mouse,
-        true,
-    );
-    game.native_fill(batch, [12.0, 28.0, batch.width - 24.0, 1.0], 0xff3a4553);
-    let [group_rect,create_group,rename_group,remove_group] = waypoint_group_buttons(batch.width);
-    let group = group_label(state.waypoint_group.as_deref());
-    button(game,batch,group_rect,&fit_text(game,&format!("{group} ▾"),group_rect[2]-8.),mouse,true);
-    let named_group = state.waypoint_group.as_ref().is_some_and(|name|!name.is_empty());
-    let empty = named_group && shown_waypoints(state).next().is_none();
-    for (rect,label,enabled) in [
-        (create_group,tr("New group","Новая группа","Nouveau groupe","Nuevo grupo","Neue Gruppe"),true),
-        (rename_group,tr("Rename group","Переименовать","Renommer le groupe","Renombrar grupo","Umbenennen"),named_group),
-        (remove_group,tr("Delete empty group","Удалить пустую","Supprimer vide","Borrar vacío","Leere löschen"),empty),
-    ] {
-        button(game,batch,rect,&fit_text(game,label,rect[2]-8.),mouse,enabled);
-    }
-    let [search,dimension,sort]=waypoint_filters(batch.width);
-    game.native_fill(batch,search,if state.waypoint_search_focus {0xff355464} else {0xff253744});
-    let hint=tr("Search waypoints…","Поиск метки…","Rechercher un repère…","Buscar marcador…","Wegpunkt suchen…");
-    let search_text=if state.waypoint_search.is_empty(){hint}else{&state.waypoint_search};
-    game.map_text(batch,&fit_text(game,search_text,search[2]-12.),[search[0]+6.,search[1]+5.],
-        if state.waypoint_search.is_empty(){0xffa8b8c5}else{0xffeef5f8},false);
-    let dimension_label=if state.waypoint_dimension==Dimension::Player {
-        tr("All dimensions","Все измерения","Toutes dimensions","Todas dimensiones","Alle Dimensionen")
-    } else {state.waypoint_dimension.label()};
-    button(game,batch,dimension,&fit_text(game,dimension_label,dimension[2]-8.),mouse,true);
-    let sort_label=match state.waypoint_sort {
-        1=>tr("Name","По имени","Par nom","Por nombre","Nach Name"),
-        2=>tr("Distance","По расстоянию","Par distance","Por distancia","Nach Entfernung"),
-        _=>tr("Added order","По созданию","Par création","Por creación","Nach Erstellung"),
+    let (list, rows) = waypoint_screen(game, state, size);
+    let centred = |game: &Game<'_>, batch: &mut HudBatch, at: [f32; 2], text: &str, color: u32| {
+        let width = game.map_text_width(text);
+        game.map_text(batch, text, [(at[0] - width * 0.5).round(), at[1]], color, true);
     };
-    button(game,batch,sort,&fit_text(game,sort_label,sort[2]-8.),mouse,true);
-    if listed_waypoints(game,state).is_empty() {
-        game.map_text(batch,tr("No matching waypoints","Нет подходящих меток","Aucun repère trouvé","No hay marcadores coincidentes","Keine passenden Wegpunkte"),
-            [16.,83.],0xffadbcc7,true);
+    centred(game, batch, list.labels[0], &ui("dimension"), look::SCREEN_TEXT);
+    centred(game, batch, list.labels[1], &ui("sort"), look::SCREEN_TEXT);
+    draw_bar(game, batch, list.bars[0], &dimension_filter_label(state.waypoint_dimension), look::SCREEN_TEXT, look::hit(mouse, list.bars[0]));
+    draw_bar(game, batch, list.bars[1], &sort_label(state.waypoint_sort), look::SCREEN_TEXT, look::hit(mouse, list.bars[1]));
+    button(game, batch, list.options, &ui("options"), mouse, true);
+    draw_bar(game, batch, list.set, &group_label(state.waypoint_group.as_deref()), look::SCREEN_TEXT, look::hit(mouse, list.set));
+    button(game, batch, list.new_set, &ui("new_set"), mouse, true);
+    game.native_fill(batch, list.band, look::LIST_BAND);
+    game.native_fill(batch, [list.band[0], list.band[1], list.band[2], 1.], look::LIST_EDGE);
+    game.native_fill(batch, [list.band[0], list.band[1] + list.band[3] - 1., list.band[2], 1.], look::LIST_EDGE);
+    draw_field(game, batch, list.filter, &state.waypoint_search, &ui("filter"), state.waypoint_search_focus);
+    let rtl = runtime::right_to_left();
+    let mut tooltip = None;
+    for (index, waypoint, row) in &rows {
+        if state.waypoint_selected == Some(waypoint.key()) {
+            game.native_fill(batch, *row, look::SELECTED_BORDER);
+            game.native_fill(batch, [row[0] + 1., row[1] + 1., row[2] - 2., row[3] - 2.], look::SELECTED_ROW);
+        }
+        let (square, centre) = look::waypoint_row_parts(*row, rtl);
+        draw_initial(game, batch, square, waypoint, &waypoint_text(state, *index, waypoint));
+        let name = fit_text(game, &waypoint.name, row[2] - 2. * (square[2] + 10.));
+        let width = game.map_text_width(&name);
+        game.map_text(batch, &name, [(centre[0] - width * 0.5).round(), centre[1].round()],
+            if waypoint.options.disabled { look::DISABLED_TEXT } else { look::SCREEN_TEXT }, true);
+        if look::hit(mouse, *row) && !state.waypoint_groups_open {
+            tooltip = Some(waypoint_details(game, waypoint));
+        }
     }
-    let mut biome_tooltip = None;
-    for (index, waypoint,row) in visible_waypoint_rows(game,state,batch.width,batch.height) {
-        let selected = state.waypoint_selected == Some(waypoint.key());
-        if selected {
-            game.native_fill(batch, row, 0xff2e4a3a);
-        } else if inside(mouse, row) {
-            game.native_fill(batch, row, 0xff222b35);
-        }
-        let letter_x = row[0] + 6.0;
-        if waypoint.icon == runtime::WaypointIcon::Skull {
-            draw_skull(game, batch, [letter_x + 4.0, row[1] + 8.0], 10.0);
-        }
-        let letter = waypoint_text(state, index, waypoint);
-        if waypoint.icon == runtime::WaypointIcon::Letter {
-            game.map_text(
-                batch,
-                &letter,
-                [letter_x, row[1] + 3.0],
-                if waypoint.color == 0 { 0xffdddddd } else { waypoint_argb(waypoint.color) },
-                false,
-            );
-        }
-        let name_x = letter_x + game.map_text_width(&letter).max(6.0) + 6.0;
-        game.map_text(
-            batch,
-            &waypoint.name,
-            [name_x, row[1] + 3.0],
-            0xffffff,
-            false,
-        );
-        let biome = waypoint.biome.as_deref();
-        let biome_x = name_x + game.map_text_width(&waypoint.name) + 7.0;
-        let right = row[0] + row[2] - 54.0;
-        if biome_x + runtime::BIOME_ICON_SIZE as f32 <= right {
-            biome_icon(game, batch, biome, [biome_x, row[1] + 3.0]);
-            if let Some(biome) = biome {
-                let label_x = biome_x + 20.0;
-                if label_x < right {
-                    let label = fit_text(game, &localized_biome(biome), right - label_x);
-                    game.map_text(batch, &label, [label_x, row[1] + 3.0], 0x8fcf86, false);
-                }
-            }
-            if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 17.0]) {
-                let label = biome.map_or_else(
-                    || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
-                    localized_biome,
-                );
-                biome_tooltip = Some(label);
-            }
-        }
-        dimension_icon(
-            game,
-            batch,
-            waypoint.dimension,
-            [row[0] + 6.0, row[1] + 22.0],
-        );
-        let mut detail=waypoint.dimension.label().to_owned();
-        if game.map_option("waypoint_hide_coords")!=Some(1) {
-            let y=if waypoint.options.unspecified_height {"~".to_owned()} else {waypoint.y.to_string()};
-            detail.push_str(&format!("  {} {y} {}",waypoint.x,waypoint.z));
-        }
-        if game.map_option("waypoint_menu_distance")==Some(1)
-            && let Some(player)=game.native_player()
-            && waypoint.dimension==Dimension::from_id(player.dimension) {
-            let distance=(f64::from(waypoint.x)+0.5-player.x).hypot(f64::from(waypoint.z)+0.5-player.z);
-            detail.push_str(&format!("  {}",waypoint_distance_text(game,distance)));
-        }
-        game.map_text(
-            batch,
-            &detail,
-            [row[0] + 26.0, row[1] + 25.0],
-            0xaaaaaa,
-            false,
-        );
-        let toggle = waypoint_3d_rect(row);
-        let on = waypoint.show_3d && !waypoint.options.disabled && !waypoint.map_only();
-        let disabled = [toggle[0] - 24.0, toggle[1], 20.0, 18.0];
-        button(game, batch, disabled, if waypoint.options.disabled { "○" } else { "●" }, mouse, true);
-        game.native_fill(batch, toggle, if on { 0xff2e7d52 } else { 0xff2a3542 });
-        if inside(mouse, toggle) {
-            game.native_fill(batch, toggle, 0xff3a4a5c);
-        }
-        let label = tr("3D", "3D", "3D", "3D", "3D");
-        game.map_text(
-            batch,
-            label,
-            [
-                toggle[0] + (toggle[2] - game.map_text_width(label)) / 2.0,
-                toggle[1] + 3.0,
-            ],
-            if on { 0xffffff } else { 0x707880 },
-            false,
-        );
+    if rows.is_empty() {
+        let text = ui(if state.waypoints.is_empty() { "no_waypoints" } else { "no_matching_waypoints" });
+        centred(game, batch, [batch.width * 0.5, list.band[1] + 8.], &text, look::GREY_TEXT);
     }
     let selected = selected_waypoint(state);
-    let [rename, delete, show, share, paste] = waypoint_actions(batch.width, batch.height);
-    button(
-        game,
-        batch,
-        rename,
-        tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten"),
-        mouse,
-        selected.is_some(),
-    );
-    button(
-        game,
-        batch,
-        delete,
-        tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen"),
-        mouse,
-        selected.is_some(),
-    );
-    button(
-        game,
-        batch,
-        show,
-        tr(
-            "Show on map",
-            "Показать на карте",
-            "Voir sur la carte",
-            "Ver en el mapa",
-            "Auf Karte zeigen",
-        ),
-        mouse,
-        selected.is_some(),
-    );
-    button(game, batch, share, tr("Copy link", "Копировать", "Copier le lien", "Copiar enlace", "Link kopieren"), mouse, selected.is_some());
-    button(game, batch, paste, tr("Paste link", "Вставить", "Coller le lien", "Pegar enlace", "Link einfügen"), mouse, true);
-    draw_notice(game, batch, state);
-    if let Some(label) = biome_tooltip {
-        draw_tooltip(game, batch, &label, mouse);
+    let [edit, teleport, share, enable, delete] = list.actions;
+    button(game, batch, edit, &ui(if selected.is_some() { "edit" } else { "add" }), mouse, true);
+    button(game, batch, teleport, &ui("teleport"), mouse, selected.is_some() && teleport_allowed(game));
+    button(game, batch, share, &ui("share"), mouse, selected.is_some());
+    button(game, batch, enable, &ui(if selected.is_some_and(|point| point.options.disabled) { "enable" } else { "disable" }), mouse, selected.is_some());
+    button(game, batch, delete, &ui("delete"), mouse, selected.is_some());
+    button(game, batch, list.done, &ui("done"), mouse, true);
+    if look::hit(mouse, share) {
+        tooltip = Some(vec![vec![(ui("tip_share"), look::TOOLTIP_TEXT)]]);
     }
     if state.waypoint_groups_open {
-        let groups=waypoint_groups(game,state);
-        let count=visible_group_rows(batch.height);
-        let start=state.waypoint_groups_scroll.min(groups.len().saturating_sub(count));
-        for (i,group) in groups.into_iter().skip(start).take(count).enumerate() {
-            let row=group_row(batch.width,i);
-            let selected=group==state.waypoint_group;
-            let label=if selected {format!("✓ {}",group_label(group.as_deref()))}
-                else {group_label(group.as_deref()).to_owned()};
-            button(game,batch,row,&fit_text(game,&label,row[2]-8.),mouse,true);
+        for (row, rect) in set_rows(game, state, list.set, list.actions[0][1]) {
+            let chosen = matches!(&row, SetRow::Select(group) if *group == state.waypoint_group);
+            let color = if matches!(row, SetRow::Select(_)) { look::SCREEN_TEXT } else { look::GREY_TEXT };
+            let label = set_row_label(&row);
+            draw_bar(game, batch, rect, &if chosen { format!("> {label} <") } else { label }, color, look::hit(mouse, rect));
+        }
+        tooltip = None;
+    }
+    draw_notice(game, batch, state);
+    if let Some(lines) = tooltip {
+        draw_tooltip_lines(game, batch, &lines, mouse);
+    }
+}
+
+/// The create / edit form's fields that take typing, in Tab order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Name,
+    X,
+    Y,
+    Z,
+    Yaw,
+    Initials,
+}
+
+const FIELDS: [Field; 6] = [Field::Name, Field::X, Field::Y, Field::Z, Field::Yaw, Field::Initials];
+
+impl NameForm {
+    fn new(state: &State, kind: MarkerMode, background: Mode) -> Self {
+        Self {
+            text: default_waypoint_name(state),
+            color: default_waypoint_color(state),
+            target: None,
+            rename: None,
+            group: state.waypoint_group.clone().unwrap_or_default(),
+            focus: Field::Name,
+            kind,
+            group_edit: None,
+            background,
+            dimension: state.selected,
+            coords: [String::new(), String::new(), String::new(), String::new()],
+            initials: String::new(),
+            show_3d: true,
+            disabled: false,
         }
     }
 
+    fn at(mut self, target: Target) -> Self {
+        self.dimension = target.dimension;
+        self.coords = [target.x.to_string(), target.y.to_string(), target.z.to_string(), String::new()];
+        self.target = Some(target);
+        self
+    }
+
+    fn field(&mut self, field: Field) -> &mut String {
+        match field {
+            Field::Name => &mut self.text,
+            Field::X => &mut self.coords[0],
+            Field::Y => &mut self.coords[1],
+            Field::Z => &mut self.coords[2],
+            Field::Yaw => &mut self.coords[3],
+            Field::Initials => &mut self.initials,
+        }
+    }
+
+    /// The typed position, when every coordinate reads as a number.
+    fn position(&self) -> Option<[i32; 3]> {
+        let mut at = [0; 3];
+        for (value, text) in at.iter_mut().zip(&self.coords) {
+            *value = text.trim().parse().ok()?;
+        }
+        Some(at)
+    }
+
+    fn yaw(&self) -> Option<i32> {
+        self.coords[3].trim().parse().ok()
+    }
+
+    fn valid(&self) -> bool {
+        !self.text.trim().is_empty() && (self.group_edit.is_some() || self.position().is_some())
+    }
+
+    fn accepts(&self, field: Field, c: char) -> bool {
+        let text = match field {
+            Field::Name => &self.text,
+            Field::X => &self.coords[0],
+            Field::Y => &self.coords[1],
+            Field::Z => &self.coords[2],
+            Field::Yaw => &self.coords[3],
+            Field::Initials => &self.initials,
+        };
+        match field {
+            Field::Name => if self.group_edit.is_some() { text.len() + c.len_utf8() <= 128 } else { text.chars().count() < 32 },
+            Field::Initials => text.chars().count() < 2,
+            _ => text.len() < 9 && (c.is_ascii_digit() || (c == '-' && text.is_empty())),
+        }
+    }
 }
 
-const NAME_FORM_HEIGHT: f32 = 156.0;
-
-fn name_form_rect(viewport_width: f32, height: f32) -> [f32; 4] {
-    let width = 340.0_f32.min(viewport_width - 24.0);
-    [
-        (viewport_width - width) / 2.0,
-        height / 2.0 - NAME_FORM_HEIGHT / 2.0,
-        width,
-        NAME_FORM_HEIGHT,
-    ]
+/// The form's field rects by field.
+fn form_field(form: &look::WaypointForm, field: Field) -> [f32; 4] {
+    match field {
+        Field::Name => form.name,
+        Field::X => form.coords[0],
+        Field::Y => form.coords[1],
+        Field::Z => form.coords[2],
+        Field::Yaw => form.coords[3],
+        Field::Initials => form.initials,
+    }
 }
 
-fn group_field(rect: [f32; 4]) -> [f32; 4] {
-    [rect[0] + 10.0, rect[1] + 56.0, rect[2] - 20.0, 18.0]
-}
-
-fn color_swatch_at(rect: [f32; 4], index: usize) -> [f32; 4] {
-    [
-        rect[0] + 10.0 + index as f32 * 22.0,
-        rect[1] + 91.0,
-        18.0,
-        18.0,
-    ]
+fn color_name(color: u32) -> String {
+    runtime::WAYPOINT_COLORS.iter().position(|c| *c == color)
+        .map_or_else(|| format!("#{color:06X}"), |i| ui(&format!("color_{i}")))
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
-    match form.background {
-        Mode::Map => draw_map_screen(game, batch, state),
-        Mode::Waypoints => draw_waypoints_screen(game, batch, state),
-        Mode::Name | Mode::Settings => {}
-        Mode::Caches => draw_cache_screen(game, batch, state),
+    if form.background == Mode::Map {
+        draw_map_backdrop(game, batch, state);
     }
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x70000000);
-    let rect = name_form_rect(batch.width, batch.height);
-    game.native_fill(batch, rect, 0xf01b2028);
-    game.native_fill(batch, [rect[0], rect[1], rect[2], 1.0], 0xff3a4553);
-    game.native_fill(
-        batch,
-        [rect[0], rect[1] + rect[3] - 1.0, rect[2], 1.0],
-        0xff3a4553,
-    );
-    game.map_text(
-        batch,
-        if form.group_edit.is_some() {
-            tr("Group name","Название группы","Nom du groupe","Nombre del grupo","Gruppenname")
-        } else if form.rename.is_some() {
-            tr(
-                "Edit waypoint",
-                "Изменить вейпоинт",
-                "Modifier le repère",
-                "Editar marcador",
-                "Wegpunkt bearbeiten",
-            )
-        } else {
-            tr(
-                "Waypoint name",
-                "Название вейпоинта",
-                "Nom du repère",
-                "Nombre del marcador",
-                "Wegpunktname",
-            )
-        },
-        [rect[0] + 10.0, rect[1] + 8.0],
-        0xffffff,
-        true,
-    );
-    let field = [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0];
-    game.native_fill(batch, field, 0xff0d1117);
-    game.map_text(
-        batch,
-        &format!("{}{}", form.text, if form.group_focused { "" } else { "_" }),
-        [field[0] + 4.0, field[1] + 5.0],
-        0xffffff,
-        false,
-    );
-    if form.group_edit.is_none() {
-    let group = group_field(rect);
-    game.map_text(batch, tr("Group", "Группа", "Groupe", "Grupo", "Gruppe"), [group[0], group[1]-10.0], 0xaaaaaa, false);
-    game.native_fill(batch, group, 0xff0d1117);
-    let value = fit_text(game, &form.group, group[2]-12.0);
-    game.map_text(batch, &format!("{value}{}", if form.group_focused { "_" } else { "" }), [group[0]+4.0, group[1]+5.0], 0xffffff, false);
-    game.map_text(
-        batch,
-        tr("Colour", "Цвет", "Couleur", "Color", "Farbe"),
-        [rect[0] + 10.0, rect[1] + 79.0],
-        0xaaaaaa,
-        false,
-    );
-    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
-        let swatch = color_swatch_at(rect, index);
-        if form.color == color {
-            game.native_fill(
-                batch,
-                [
-                    swatch[0] - 2.0,
-                    swatch[1] - 2.0,
-                    swatch[2] + 4.0,
-                    swatch[3] + 4.0,
-                ],
-                0xffffffff,
-            );
-        }
-        game.native_fill(batch, swatch, waypoint_argb(color));
-    }
-    }
+    let size = [batch.width, batch.height];
     let mouse = game.cursor();
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    button(
-        game,
-        batch,
-        save,
-        tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
-        mouse,
-        true,
-    );
-    button(
-        game,
-        batch,
-        cancel,
-        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
-        mouse,
-        true,
-    );
-    game.map_text(
-        batch,
-        tr(
-            "Enter — save, Esc — cancel",
-            "Enter — сохранить, Esc — отмена",
-            "Entrée — enregistrer, Échap — annuler",
-            "Intro — guardar, Esc — cancelar",
-            "Eingabe — speichern, Esc — abbrechen",
-        ),
-        [rect[0] + 10.0, rect[1] + 116.0],
-        0x888f98,
-        false,
-    );
-}
-
-fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2]) {
-    let width = game.map_text_width(text);
-    let x = (at[0] + 10.0).min(batch.width - width - 10.0).max(4.0);
-    let y = (at[1] - 18.0).max(4.0);
-    game.native_fill(batch, [x - 4.0, y - 3.0, width + 8.0, 13.0], 0xf01b2028);
-    game.map_text(batch, text, [x, y], 0xffffd24a, true);
+    let layout = look::waypoint_form(size, runtime::right_to_left());
+    let title = if form.group_edit.is_some() {
+        ui(if matches!(form.group_edit, Some(GroupEdit::Create)) { "new_set" } else { "rename_set" })
+    } else if form.rename.is_some() { ui("edit_waypoint") } else { ui("new_waypoint") };
+    let width = game.map_text_width(&title);
+    game.map_text(batch, &title, [(layout.title[0] - width * 0.5).round(), layout.title[1]], look::SCREEN_TEXT, true);
+    draw_field(game, batch, layout.name, &form.text, &ui("name"), form.focus == Field::Name);
+    if form.group_edit.is_none() {
+        draw_bar(game, batch, layout.world, &format!("{} ({})", state.world.rsplit(['/', '\\', ':']).next().unwrap_or(&state.world), ui("auto")),
+            look::GREY_TEXT, false);
+        draw_bar(game, batch, layout.dimension, form.dimension.label(), look::SCREEN_TEXT, look::hit(mouse, layout.dimension));
+        draw_bar(game, batch, layout.set, &group_label(Some(&form.group)), look::SCREEN_TEXT, look::hit(mouse, layout.set));
+        draw_bar(game, batch, layout.color, &color_name(form.color), waypoint_argb(form.color), look::hit(mouse, layout.color));
+        for (field, hint) in [(Field::X, "x"), (Field::Y, "y"), (Field::Z, "z"), (Field::Yaw, "yaw")] {
+            let text = match field { Field::X => &form.coords[0], Field::Y => &form.coords[1], Field::Z => &form.coords[2], _ => &form.coords[3] };
+            draw_field(game, batch, form_field(&layout, field), text, &ui(hint), form.focus == field);
+        }
+        let auto = first_letter(&form.text).to_string();
+        draw_field(game, batch, layout.initials, &form.initials, &auto, form.focus == Field::Initials);
+        button(game, batch, layout.world_3d, &format!("{}: {}", ui("in_world"), ui(if form.show_3d { "on" } else { "off" })), mouse, true);
+        button(game, batch, layout.enabled, &ui(if form.disabled { "disabled" } else { "enabled" }), mouse, true);
+    }
+    button(game, batch, layout.confirm, &ui("confirm"), mouse, form.valid());
+    button(game, batch, layout.cancel, &ui("cancel"), mouse, true);
 }
 
 // Hit-test the full short label of the waypoint under the map pointer.
@@ -2727,24 +2115,21 @@ fn waypoint_at_pointer<'a>(
     rect: [f32; 4],
     mouse: [f32; 2],
 ) -> Option<&'a Waypoint> {
+    let scale = game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32;
     state
         .waypoints
         .iter()
         .enumerate()
+        .rev()
         .find(|(index, waypoint)| {
             if waypoint.dimension != view.dimension || !map_waypoint_visible(game, state, waypoint) {
                 return false;
             }
-            let pixel = view.screen_at([f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
-            let x = rect[0] + pixel[0] as f32 * rect[2] / view.width as f32;
-            let y = rect[1] + pixel[1] as f32 * rect[3] / view.height as f32;
-            let letter = waypoint_text(state, *index, waypoint);
-            let radius = if waypoint.icon == runtime::WaypointIcon::Letter {
-                (game.map_text_width(&letter) + 4.).max(14.) / 2.
-            } else {
-                7.
-            };
-            (mouse[0] - x).abs() <= radius && (mouse[1] - y).abs() <= 7.0
+            let at = world_screen(view, rect, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
+            let width = game.map_text_width(&waypoint_text(state, *index, waypoint)) * look::PENNANT_FONT;
+            let scale = scale.max(0.25) * ((width + 4.) / look::PENNANT[0]).max(1.);
+            let (body, _) = look::pennant(at, scale);
+            look::hit(mouse, [body[0], body[1], body[2], at[1] - body[1] + 1.])
         })
         .map(|(_, point)| point)
 }
@@ -3074,6 +2459,10 @@ fn draw_border(
     } else {
         chunk_radius
     };
+    // Xaero's "Display Server Chunk Radius": off unless asked.
+    if game.map_option("map_server_radius") != Some(1) {
+        return;
+    }
     let chunk_segments = chunk_border_segments(view, rect, center, chunk_radius);
     draw_segments(game, batch, rect, &chunk_segments, border_color);
     if view.large {
@@ -3660,7 +3049,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                         _ => None,
                     }
                 };
-                let tab = back.map_or(0, |mode| if mode == Mode::Map {1} else {2});
+                let tab = back.map(|mode| if mode == Mode::Map {1} else {2});
                 open_settings(&mut state,back,tab);
             } else {
                 state.mode = desired;
@@ -3791,8 +3180,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let settings = controller.settings();
     use runtime::minimap::CaveView;
     let screen_open=game.mod_screen()==Some(runtime::MOD_ID);
-    let large=screen_open && (state.mode==Mode::Map ||
-        state.mode==Mode::Settings && state.settings_return==Some(Mode::Map));
+    let large=screen_open && map_behind(&state);
     let appearance = terrain_appearance(game, large);
     if state.appearance != appearance {
         state.seen.clear();
@@ -4705,7 +4093,16 @@ fn minimap_lines(game: &Game<'_>, state: &State, settings: runtime::minimap::Set
     let claim = (game.map_option("minimap_current_claim") != Some(0)).then(|| claim_text(game,state,chunk)).flatten();
     let mut lines = Vec::new();
     let Some(config) = state.info_displays.as_ref() else {
-        lines.extend(runtime::coordinate_lines(settings, dimension, position).into_iter().map(|text| (text,None,None)));
+        // One fact per line: here, then (when asked) the same place in the other dimension.
+        if settings.overworld_coordinates {
+            lines.push((format!("{}, {}, {}", block[0], block[1], block[2]), None, None));
+        }
+        let other = if dimension == Dimension::Nether { Dimension::Overworld } else { Dimension::Nether };
+        if settings.nether_coordinates
+            && let Some([x, _, z]) = runtime::portal_coordinates(dimension, other, position)
+        {
+            lines.push((format!("{}: {x}, {z}", other.label()), None, None));
+        }
         lines.extend(claim.into_iter().map(|text| (text,None,None)));
         return lines;
     };
@@ -4783,81 +4180,71 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
     }
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     if missing_item(game,&state(),false).is_some() {return;}
-    if game.native_minimap_now().is_none() && settings.enabled {
-        if let Some(size) = fitted_minimap_size(game,settings,batch.width,batch.height) {
-            let corner = match settings.corner {
-                runtime::minimap::Corner::TopLeft => Corner::TopLeft,
-                runtime::minimap::Corner::TopRight => Corner::TopRight,
-                runtime::minimap::Corner::BottomLeft => Corner::BottomLeft,
-                runtime::minimap::Corner::BottomRight => Corner::BottomRight,
-            };
-            if game.native_corner_shown(corner) {
-                let state = state();
-                let lines = minimap_lines(game, &state, settings);
-                let scale = minimap_ui_scale(game);
-                let line_height = 12. * scale;
-                let footer = if lines.is_empty() { 0. } else { lines.len() as f32 * line_height + 2. };
-                let width = lines.iter()
-                    .map(|(line, _, _)| game.map_text_width(line) * scale + 4.)
-                    .fold(size, f32::max);
-                let (x, mut y) = corners.place(corner, width, size + footer);
-                let effects = game.map_option("minimap_effect_push").unwrap_or(1);
-                if corner == Corner::TopRight && effects == 0 {
-                    y -= effect_height(game);
-                } else if corner == Corner::BottomRight && effects == 2 {
-                    y -= effect_height(game);
-                }
-                let boss = game.map_option("minimap_boss_push").unwrap_or(1);
-                if boss != 0 {
-                    let bars = game.boss_overlay.bars(horizon_client::boss_overlay::now_millis()).len();
-                    let bottom = horizon_client::hud_overlays::boss_bars_bottom(batch.height as i32,bars) as f32;
-                    let overlaps = x < batch.width*0.5+92. && x+width > batch.width*0.5-92.;
-                    if overlaps && bottom > 0. {
-                        if boss == 2 { y += bottom; }
-                        else if y < bottom { y = bottom + 2.; }
-                    }
-                }
-                let map_x = if matches!(corner, Corner::TopRight | Corner::BottomRight) {
-                    x + width - size
-                } else {
-                    x
-                };
-                let centered = quick_minimap() && game.map_option("quick_minimap_centered") == Some(1);
-                let (map_x,y) = if centered { ((batch.width-size)*0.5,(batch.height-size-footer)*0.5) } else { (map_x,y) };
-                let rect = [map_x, y, size, size];
-                let first_vertex = batch.vertices.len();
-                draw(game, batch, &state, rect, false, None);
-                draw_minimap_frame(game, batch, rect, settings.round);
-                if let Some(frame)=state.frame.as_ref().filter(|frame| !frame.view.large &&
-                    frame.view.dimension==state.selected && frame.view.session==state.session) {
-                    draw_radar(game,batch,&frame.view,rect,settings.round,true);
-                }
-                set_opacity(batch, first_vertex, game.map_option("minimap_opacity").unwrap_or(100));
-                if !lines.is_empty() {
-                    let left = if centered { map_x + (size - width) * 0.5 } else { x };
-                    let top = y + size + 2.;
-                    let opacity = u32::from(game.map_option("minimap_info_background").unwrap_or(40).min(100));
-                    game.native_fill(batch, [left, top, width, footer - 2.], (opacity * 255 / 100) << 24);
-                    let alignment = game.map_option("minimap_info_alignment").unwrap_or(0);
-                    for (index, (line, fg, bg)) in lines.iter().enumerate() {
-                        if let Some(color) = bg {
-                            game.native_fill(batch, [left, top + index as f32 * line_height, width, line_height],
-                                (opacity * 255 / 100) << 24 | color);
-                        }
-                        let spare = width - game.map_text_width(line) * scale;
-                        let start = left + match alignment {
-                            1 => 2.,
-                            2 => spare - 2.,
-                            _ => spare * 0.5,
-                        };
-                        let baseline = top + (index as f32 * 12. + 1.) * scale;
-                        let first = batch.vertices.len();
-                        game.map_text(batch, line, [start, baseline], fg.unwrap_or(0xdddddd), true);
-                        batch.scale_since(first, start, baseline, scale, scale);
-                    }
-                }
-            }
+    if game.native_minimap_now().is_some() || !settings.enabled {
+        return;
+    }
+    let Some(side) = fitted_minimap_size(game,settings,batch.width,batch.height) else { return };
+    // Corners are logical: a right-to-left language mirrors them.
+    let rtl = runtime::right_to_left();
+    let corner = match (settings.corner, rtl) {
+        (runtime::minimap::Corner::TopLeft, false) | (runtime::minimap::Corner::TopRight, true) => Corner::TopLeft,
+        (runtime::minimap::Corner::TopRight, false) | (runtime::minimap::Corner::TopLeft, true) => Corner::TopRight,
+        (runtime::minimap::Corner::BottomLeft, false) | (runtime::minimap::Corner::BottomRight, true) => Corner::BottomLeft,
+        (runtime::minimap::Corner::BottomRight, false) | (runtime::minimap::Corner::BottomLeft, true) => Corner::BottomRight,
+    };
+    if !game.native_corner_shown(corner) {
+        return;
+    }
+    let state = state();
+    let lines = minimap_lines(game, &state, settings);
+    let outer = side + 2. * look::FRAME;
+    let height = look::minimap_height(side, lines.len());
+    // `Corners` keeps two pixels from the edge; the frame keeps MAP_MARGIN.
+    let pad = look::MAP_MARGIN - 2.;
+    let (x, mut y) = corners.place(corner, outer + pad, height + pad);
+    let x = if matches!(corner, Corner::TopLeft | Corner::BottomLeft) { x + pad } else { x };
+    if matches!(corner, Corner::TopLeft | Corner::TopRight) { y += pad; }
+    let effects = game.map_option("minimap_effect_push").unwrap_or(1);
+    if corner == Corner::TopRight && effects == 0 {
+        y -= effect_height(game);
+    } else if corner == Corner::BottomRight && effects == 2 {
+        y -= effect_height(game);
+    }
+    let boss = game.map_option("minimap_boss_push").unwrap_or(1);
+    if boss != 0 {
+        let bars = game.boss_overlay.bars(horizon_client::boss_overlay::now_millis()).len();
+        let bottom = horizon_client::hud_overlays::boss_bars_bottom(batch.height as i32,bars) as f32;
+        let overlaps = x < batch.width*0.5+92. && x+outer > batch.width*0.5-92.;
+        if overlaps && bottom > 0. {
+            if boss == 2 { y += bottom; }
+            else if y < bottom { y = bottom + 2.; }
         }
+    }
+    let centered = quick_minimap() && game.map_option("quick_minimap_centered") == Some(1);
+    let (x, y) = if centered { ((batch.width-outer)*0.5,(batch.height-height)*0.5) } else { (x, y) };
+    let map = [x + look::FRAME, y + look::FRAME, side, side];
+    let first_vertex = batch.vertices.len();
+    draw(game, batch, &state, map, false, None);
+    draw_minimap_frame(game, batch, map, settings.round);
+    if let Some(frame)=state.frame.as_ref().filter(|frame| !frame.view.large &&
+        frame.view.dimension==state.selected && frame.view.session==state.session) {
+        draw_radar(game,batch,&frame.view,map,settings.round,true);
+        draw_minimap_waypoints(game,batch,&state,&frame.view,map,settings.round);
+        if let Some(player) = game.native_player() {
+            draw_player(game,batch,&frame.view,map,state.marker,&player,settings.rotate_with_player);
+        }
+        draw_compass(game,batch,&frame.view,map,settings.round,&settings);
+    }
+    set_opacity(batch, first_vertex, game.map_option("minimap_opacity").unwrap_or(100));
+    let widths: Vec<f32> = lines.iter().map(|(line, _, _)| game.map_text_width(line)).collect();
+    for ((line, fg, bg), rect) in lines.iter().zip(look::info_lines(map, &widths)) {
+        let left = rect[0].clamp(2., (batch.width - rect[2] - 2.).max(2.));
+        if let Some(color) = bg {
+            let opacity = u32::from(game.map_option("minimap_info_background").unwrap_or(40).min(100));
+            game.native_fill(batch, [left - 1., rect[1] - 1., rect[2] + 2., rect[3] + 1.],
+                (opacity * 255 / 100) << 24 | color);
+        }
+        draw_text(game, batch, line, [left, rect[1]], fg.map_or(look::INFO_TEXT, |rgb| 0xff00_0000 | rgb), true);
     }
 }
 
@@ -4887,19 +4274,6 @@ pub(super) fn gui_render_post(
     draw_tracked_in_world(game,batch);
 }
 
-/// The eight compass points as world-space unit steps (`dx`, `dz`): north is
-/// `-Z`, east is `+X`. `draw_directions` rotates them by the map's angle.
-const DIRECTION_STEPS: [(f64, f64); 8] = [
-    (0.0, -1.0),  // N
-    (1.0, -1.0),  // NE
-    (1.0, 0.0),   // E
-    (1.0, 1.0),   // SE
-    (0.0, 1.0),   // S
-    (-1.0, 1.0),  // SW
-    (-1.0, 0.0),  // W
-    (-1.0, -1.0), // NW
-];
-
 fn direction_label(style: runtime::minimap::DirectionStyle, index: usize) -> &'static str {
     match style {
         runtime::minimap::DirectionStyle::Compass => match index {
@@ -4927,69 +4301,115 @@ fn direction_label(style: runtime::minimap::DirectionStyle, index: usize) -> &'s
     }
 }
 
-/// Cardinal letters at the inner edge of the map. They rotate with the map so
-/// the north marker always points at real north.
-fn draw_directions(
+/// Text at a fraction of the font's size with its top-left at `at`, and its own shadow one
+/// font pixel down and right (so one screen pixel at half size).
+fn small_text(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2], scale: f32, color: u32, shadow: Option<u32>) {
+    let first = batch.vertices.len();
+    if let Some(shadow) = shadow {
+        game.map_text(batch, text, [at[0] + 1., at[1] + 1.], shadow, false);
+    }
+    game.map_text(batch, text, at, color, false);
+    batch.scale_since(first, at[0], at[1], scale, scale);
+}
+
+/// N E S W riding the inside of the frame on their blue boxes, always upright.
+fn draw_compass(
     game: &Game<'_>,
     batch: &mut HudBatch,
     view: &View,
-    rect: [f32; 4],
+    map: [f32; 4],
     round: bool,
-    large: bool,
     settings: &runtime::minimap::Settings,
 ) {
-    let compass=game.map_option("minimap_compass_location").unwrap_or(1);
-    if !settings.directions || !large && compass==0 { return; }
-    let (s, c) = view.angle.sin_cos();
-    let cx = f64::from(rect[0]) + f64::from(rect[2]) / 2.0;
-    let cy = f64::from(rect[1]) + f64::from(rect[3]) / 2.0;
-    // The large map's dimension tabs and coordinate footer float at the top and
-    // bottom; keep the letters clear of them there.
-    let (inset, top, bottom) = if large {
-        (12.0, 36.0, 52.0)
-    } else {
-        let inset=if compass==2 {5.} else {8.};
-        (inset,inset,inset)
+    if !settings.directions || game.map_option("minimap_compass_location") == Some(0) {
+        return;
+    }
+    for (index, (_, rect)) in look::compass_boxes(map, view.angle as f32, round).into_iter().enumerate() {
+        let label = direction_label(settings.direction_style, index * 2);
+        let width = game.map_text_width(label) * look::COMPASS_FONT;
+        let centre = [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5];
+        let side = rect[2].max(width + 1.);
+        game.native_fill(batch, [centre[0] - side * 0.5, rect[1], side, rect[3]], look::COMPASS_BOX);
+        small_text(game, batch, label, [centre[0] - width * 0.5, centre[1] - 2.], look::COMPASS_FONT,
+            look::COMPASS_TEXT, Some(look::COMPASS_SHADOW));
+    }
+}
+
+/// The player: a crosshair on a map that turns with the player, the red notched arrow when
+/// north is locked (and always on the world map).
+fn draw_player(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    map: [f32; 4],
+    at: [f64; 2],
+    player: &crate::game::native_hooks::NativePlayer,
+    rotating: bool,
+) {
+    let [x, y] = world_screen(view, map, at);
+    if !inside([x, y], map) {
+        return;
+    }
+    let same_dimension = Dimension::from_id(player.dimension) == view.dimension;
+    let opacity = if view.large { 255 } else {
+        u32::from(game.map_option("minimap_arrow_opacity").unwrap_or(100)) * 255 / 100
     };
-    let radius = f64::from(rect[2].min(rect[3])) / 2.0 - f64::from(inset);
-    let half_width = f64::from(rect[2]) / 2.0 - f64::from(inset);
-    let half_top = f64::from(rect[3]) / 2.0 - f64::from(top);
-    let half_bottom = f64::from(rect[3]) / 2.0 - f64::from(bottom);
-    for (index, (dx, dz)) in DIRECTION_STEPS.iter().copied().enumerate() {
-        // Screen direction of a world step, rotating with the map's angle.
-        let sx = dx * c + dz * s;
-        let sy = -dx * s + dz * c;
-        let (x, y) = if round {
-            let length = sx.hypot(sy);
-            if length <= f64::EPSILON {
-                continue;
-            }
-            (cx + sx / length * radius, cy + sy / length * radius)
-        } else {
-            let mut t = f64::INFINITY;
-            if sx.abs() > 1e-6 {
-                t = t.min(half_width / sx.abs());
-            }
-            if sy < 0.0 {
-                t = t.min(half_top / sy.abs());
-            } else if sy > 0.0 {
-                t = t.min(half_bottom / sy.abs());
-            }
-            if !t.is_finite() {
-                continue;
-            }
-            (cx + sx * t, cy + sy * t)
-        };
-        let label = direction_label(settings.direction_style, index);
-        let width = game.map_text_width(label);
-        let lx = x as f32 - width / 2.0;
-        let ly = y as f32 - 4.0;
-        let color=if large {0} else {game.map_color_option(if index==0 {"minimap_compass_north"} else {"minimap_compass_color"}).unwrap_or(0)};
-        let scale = if large { 1. } else { waypoint_scale(game, "minimap_compass_scale") * minimap_ui_scale(game) };
-        let first=batch.vertices.len();
-        game.native_fill(batch,[lx-2.,ly-2.,width+4.,12.],0x90000000|color);
-        game.map_text(batch,label,[lx,ly],0xffffffff,true);
-        batch.scale_since(first,x as f32,y as f32,scale,scale);
+    let alpha = if same_dimension { opacity } else { opacity * 3 / 4 };
+    let tint = |argb: u32| (((argb >> 24) * alpha / 255) << 24) | (argb & 0x00ff_ffff);
+    let mode = if view.large { 2 } else { game.map_option("minimap_marker_mode").unwrap_or(2) };
+    if !view.large && (rotating || mode != 2) {
+        let [horizontal, vertical, centre] = look::crosshair([x, y]);
+        game.native_fill(batch, horizontal, tint(look::CROSSHAIR));
+        game.native_fill(batch, vertical, tint(look::CROSSHAIR));
+        game.native_fill(batch, centre, tint(look::CROSSHAIR_CENTRE));
+        return;
+    }
+    let key = if view.large { "world_marker_color" } else { "minimap_marker_color" };
+    let fill = 0xff00_0000 | game.map_color_option(key).unwrap_or(look::ARROW & 0x00ff_ffff);
+    let scale = if view.large { look::ARROW_SCALE } else {
+        game.map_number("minimap_arrow_scale").unwrap_or(f64::from(look::ARROW_SCALE)) as f32
+    };
+    let forward = view.player_heading(f64::from(player.yaw), [map[2], map[3]]);
+    let rim = look::arrow([x, y], forward, scale + 0.35);
+    let body = look::arrow([x, y], forward, scale);
+    for ([tip, left, notch, right], color) in [(rim, tint(look::ARROW_RIM)), (body, tint(fill))] {
+        game.native_quad(batch, [tip, left, notch, tip], color);
+        game.native_quad(batch, [tip, notch, right, tip], color);
+    }
+}
+
+/// The minimap's waypoints: squares of their colour with the initial, clamped onto the frame
+/// when out of range; a death point is a black square with a skull.
+fn draw_minimap_waypoints(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    state: &State,
+    view: &View,
+    map: [f32; 4],
+    round: bool,
+) {
+    if game.map_option("minimap_waypoints") == Some(0) {
+        return;
+    }
+    let alpha = u32::from(game.map_option("waypoint_map_opacity").unwrap_or(90).min(100)) * 255 / 100;
+    for (index, waypoint) in state.waypoints.iter().enumerate()
+        .filter(|(_, point)| point.dimension == view.dimension && map_waypoint_visible(game, state, point))
+    {
+        let at = world_screen(view, map, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
+        let square = look::waypoint_square(map, round, at);
+        let centre = [square[0] + square[2] * 0.5, square[1] + square[3] * 0.5];
+        if waypoint.icon == runtime::WaypointIcon::Skull {
+            game.native_fill(batch, square, look::DEATH_FILL);
+            draw_skull(game, batch, centre, square[2] * 0.8);
+            continue;
+        }
+        let letter = waypoint_text(state, index, waypoint);
+        let width = game.map_text_width(&letter);
+        let side = square[2].max(width + 2.);
+        let rect = [centre[0] - side * 0.5, square[1], side, square[3]];
+        let rgb = if waypoint.color == 0 { 0x00ff_ffff } else { waypoint.color & 0x00ff_ffff };
+        game.native_fill(batch, rect, (alpha << 24) | rgb);
+        game.map_text(batch, &letter, [(centre[0] - width * 0.5).round(), (centre[1] - 4.).round()], look::INITIAL_TEXT, true);
     }
 }
 
@@ -5273,38 +4693,73 @@ pub(super) fn tick_radar(game: &Game<'_>) {
     });
 }
 
-fn radar_icon(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::map::radar::Dot, dst: [f32;4], opacity: u32) -> bool {
-    if dot.kind == "minecraft:player" {
-        let skin = mob.map(|mob| mob.skin.as_deref().unwrap_or(&mob.kind.texture)).unwrap_or("entity/player/wide/steve");
-        if game.native_sprite(batch, skin, [8.,8.,8.,8.], dst, Some(opacity | 0xffffff)) {
-            game.native_sprite(batch, skin, [40.,8.,8.,8.], dst, Some(opacity | 0xffffff));
-            return true;
+/// What kind of thing a radar dot is, for the draw order.
+fn radar_kind(dot: &::map::radar::Dot, mob: Option<&horizon_client::mobs::Mob>) -> look::Kind {
+    match dot.kind.as_str() {
+        "minecraft:player" => look::Kind::Player,
+        "minecraft:item" => look::Kind::Item,
+        _ => match mob {
+            Some(mob) if mob.category() == "monster" || dot.kind == "minecraft:ender_dragon" => look::Kind::Hostile,
+            Some(_) => look::Kind::Passive,
+            None => look::Kind::Item,
+        },
+    }
+}
+
+/// A face sprite with its one-screen-pixel black outline following the silhouette, then the
+/// face itself darkened by `shade`.
+fn outlined_sprite(game: &Game<'_>, batch: &mut HudBatch, texture: &str, sources: &[[f32; 4]], dst: [f32; 4], alpha: u32, shade: f32) -> bool {
+    let pixel = 1. / batch.scale.max(1.);
+    let outline = (alpha << 24) | (look::HEAD_OUTLINE & 0x00ff_ffff);
+    for [dx, dy] in look::outline_offsets(pixel) {
+        for src in sources {
+            if !game.native_sprite(batch, texture, *src, [dst[0] + dx, dst[1] + dy, dst[2], dst[3]], Some(outline)) {
+                return false;
+            }
         }
-        return game.native_sprite(batch, "entity/player/wide/steve", [8.,8.,8.,8.], dst, Some(opacity | 0xffffff));
+    }
+    let level = (shade.clamp(0., 1.) * 255.).round() as u32;
+    let tint = (alpha << 24) | (level << 16) | (level << 8) | level;
+    for src in sources {
+        game.native_sprite(batch, texture, *src, dst, Some(tint));
+    }
+    true
+}
+
+/// An entity's head at `at`: a player's skin face with its hat, an item's sprite, or the
+/// mob's own face from its texture, one texel per GUI pixel times `scale`.
+fn draw_head(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::map::radar::Dot, at: [f32; 2], scale: f32, alpha: u32, shade: f32) -> Option<[f32; 4]> {
+    if dot.kind == "minecraft:player" {
+        let dst = look::head_rect(at, [8., 8.], scale);
+        let skin = mob.map(|mob| mob.skin.as_deref().unwrap_or(&mob.kind.texture)).unwrap_or("entity/player/wide/steve");
+        let layers = [[8., 8., 8., 8.], [40., 8., 8., 8.]];
+        return (outlined_sprite(game, batch, skin, &layers, dst, alpha, shade)
+            || outlined_sprite(game, batch, "entity/player/wide/steve", &layers, dst, alpha, shade)).then_some(dst);
     }
     if dot.kind == "minecraft:item" {
-        let Some(item) = game.dropped.iter().find(|item| item.id == dot.entity_id) else { return false };
+        let item = game.dropped.iter().find(|item| item.id == dot.entity_id)?;
+        let side = look::ITEM_SIDE * scale;
+        let dst = look::head_rect(at, [side, side], 1.);
         let start = batch.vertices.len();
-        let drawn = game.native_item_stack(batch,&item.stack,[dst[0],dst[1]],dst[2]);
-        set_opacity(batch,start,((opacity >> 24)*100/255) as u8);
-        return drawn;
+        let drawn = game.native_item_stack(batch, &item.stack, [dst[0], dst[1]], side);
+        set_opacity(batch, start, (alpha * 100 / 255) as u8);
+        return drawn.then_some(dst);
     }
-
-    let Some(mob) = mob else { return false };
+    let mob = mob?;
     let (model_key, texture) = horizon_client::mobs::render::body(mob);
     let model = mob.kind.layer(&model_key).unwrap_or(&mob.kind.model);
-    let Some(sprite) = game.gui.atlas.sprites.get(texture.as_ref()) else { return false };
+    let sprite = game.gui.atlas.sprites.get(texture.as_ref())?;
     let head = radar_head(model).unwrap_or(model);
-    let Some(face) = head.polygons.iter().filter(|face| face.normal[2] < -0.5)
-        .max_by(|a,b| radar_uv_area(a).total_cmp(&radar_uv_area(b))) else { return false };
+    let face = head.polygons.iter().filter(|face| face.normal[2] < -0.5)
+        .max_by(|a,b| radar_uv_area(a).total_cmp(&radar_uv_area(b)))?;
     let [u0,v0,u1,v1] = radar_uv(face);
-    if u0 >= u1 || v0 >= v1 || u0 < 0. || v0 < 0. || u1 > 1. || v1 > 1. { return false; }
+    if u0 >= u1 || v0 >= v1 || u0 < 0. || v0 < 0. || u1 > 1. || v1 > 1. { return None; }
     let (width,height) = (sprite.w as f32,sprite.h as f32);
     let src = [u0*width,v0*height,(u1-u0)*width,(v1-v0)*height];
-    let [x,y,w,h] = dst;
-    let ratio = src[2] / src[3];
-    let (w2,h2) = if ratio > 1. { (w,h/ratio) } else { (w*ratio,h) };
-    game.native_sprite(batch,texture.as_ref(),src,[x+(w-w2)*0.5,y+(h-h2)*0.5,w2,h2],Some(opacity | 0xffffff))
+    // Textures drawn at a higher resolution than 64 texels keep the vanilla face size.
+    let texel = (64. / width.max(1.)).min(1.);
+    let dst = look::head_rect(at, [src[2] * texel, src[3] * texel], scale);
+    outlined_sprite(game, batch, texture.as_ref(), &[src], dst, alpha, shade).then_some(dst)
 }
 
 fn radar_head(part: &horizon_client::mobs::Part) -> Option<&horizon_client::mobs::Part> {
@@ -5328,12 +4783,18 @@ fn radar_uv_area(face: &horizon_client::mobs::Polygon) -> f32 {
 fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], round: bool, after_frame: bool) {
     let Some(radar) = ::map::radar::snapshot() else { return };
     if radar.dimension != view.dimension.id() || (view.large && !radar.world_map) { return; }
-    let dots = radar.dots.iter().filter(|dot| !view.large && dot.over_frame == after_frame || view.large && !after_frame);
-    let mobs: horizon_client::fast_hash::FxHashMap<_,_> = if radar.smooth || dots.clone().any(|dot| dot.icon) {
-        game.mobs.iter().map(|mob| (mob.id,mob)).collect()
-    } else { Default::default() };
+    let mobs: horizon_client::fast_hash::FxHashMap<_,_> = game.mobs.iter().map(|mob| (mob.id,mob)).collect();
+    // Nearest last within a kind; kinds in a fixed order so the important face is on top.
+    let mut dots: Vec<_> = radar.dots.iter().rev()
+        .filter(|dot| !view.large && dot.over_frame == after_frame || view.large && !after_frame)
+        .map(|dot| (radar_kind(dot, mobs.get(&dot.entity_id).copied()), dot))
+        .collect();
+    dots.sort_by_key(|(kind, _)| *kind);
+    let scale = radar.icon_size / 8.;
     let mut labels = Vec::new();
-    for dot in dots.rev() {
+    for (_, dot) in dots {
+        let shade = if dot.depth_shade { look::depth_shade(dot.dy) } else { Some(1.) };
+        let Some(shade) = shade else { continue };
         let mut position = dot.at;
         if radar.smooth && let Some(mob) = mobs.get(&dot.entity_id) {
             let current = mob.position;
@@ -5347,41 +4808,31 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
         }
         let [x,_,z] = position;
         let [x,y] = world_screen(view,rect,[x,z]);
-        let width = if dot.icon { radar.icon_size*dot.icon_scale } else { dot.size };
-        let half = width*0.5;
-        let within = |at| map_overlay_inside(at,rect,round) ||
-            after_frame && x >= rect[0] && y >= rect[1] && x <= rect[0]+rect[2] && y <= rect[1]+rect[3] &&
-                (!round || ((x-rect[0])/rect[2]-0.5).hypot((y-rect[1])/rect[3]-0.5) <= 0.5);
-        if !within([x-half-1.,y-half-1.]) || !within([x+half+1.,y+half+1.]) { continue; }
-        let alpha = u32::from(dot.alpha)<<24;
-        let icon = dot.icon && radar_icon(game,batch,mobs.get(&dot.entity_id).copied(),dot,[x-half,y-half,width,width],alpha);
-        if !icon {
+        if !look::on_map(rect, round, [x, y]) { continue; }
+        let alpha = u32::from(dot.alpha);
+        let head = if dot.icon {
+            draw_head(game,batch,mobs.get(&dot.entity_id).copied(),dot,[x,y],scale*dot.icon_scale,alpha,shade)
+        } else { None };
+        let shape = head.unwrap_or_else(|| {
             let half = dot.size*0.5;
-            if radar.legacy || dot.size<4. {
-                game.native_fill(batch,[x-half-1.,y-half-1.,dot.size+2.,dot.size+2.],0xaf0a1318);
-                game.native_fill(batch,[x-half,y-half,dot.size,dot.size],alpha|dot.color);
-            } else {
-                for (radius,color) in [(half+1.,0xaf0a1318),(half,alpha|dot.color)] {
-                    game.native_quad(batch,[[x,y-radius],[x+radius,y],[x,y+radius],[x-radius,y]],color);
-                }
+            let level = (shade * 255.) as u32;
+            let rgb = |c: u32| [16,8,0].into_iter().map(|s| ((c >> s & 255) * level / 255) << s).sum::<u32>();
+            for (radius,color) in [(half+1.,(alpha<<24)|0x0a1318),(half,(alpha<<24)|rgb(dot.color))] {
+                game.native_quad(batch,[[x,y-radius],[x+radius,y],[x,y+radius],[x-radius,y]],color);
             }
-        }
-        let label = dot.label.as_ref().or_else(|| if icon {None} else {dot.fallback_name.as_ref()});
+            [x-half,y-half,dot.size,dot.size]
+        });
+        let label = dot.label.as_ref().or_else(|| if head.is_some() {None} else {dot.fallback_name.as_ref()});
         if let Some(label) = label {
-            labels.push((label,alpha|dot.color,[x,y-width*0.5]));
+            labels.push((label,alpha,shape));
         }
     }
-    for (label,color,[x,y]) in labels.into_iter().rev().take(if view.large {48} else {24}).collect::<Vec<_>>().into_iter().rev() {
-        let scale=radar.name_scale;
-        let width=game.map_text_width(label)*scale;
-        let start=[x-width*0.5,y-10.*scale];
-        if [start,[start[0]+width,start[1]],[start[0],y],[start[0]+width,y]]
-            .into_iter().all(|corner| map_overlay_inside(corner,rect,round))
-        {
-            let vertex=batch.vertices.len();
-            game.map_text(batch,label,start,color,true);
-            batch.scale_since(vertex,start[0],start[1],scale,scale);
-        }
+    for (label,alpha,head) in labels.into_iter().rev().take(if view.large {48} else {24}).collect::<Vec<_>>().into_iter().rev() {
+        let width = game.map_text_width(label);
+        let (tag, text) = look::name_tag(head, width);
+        if !look::contains(rect, tag) { continue; }
+        game.native_fill(batch, tag, ((look::NAME_BOX >> 24) * alpha / 255) << 24);
+        small_text(game, batch, label, text, look::NAME_FONT, (alpha << 24) | 0x00ff_ffff, None);
     }
 }
 
@@ -5469,28 +4920,18 @@ fn map_overlay_inside(at: [f32; 2], rect: [f32; 4], round: bool) -> bool {
     !round || x.hypot(z) <= 0.48
 }
 
-fn draw_minimap_frame(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], round: bool) {
-    let mode = game.map_option("minimap_frame").unwrap_or(0);
-    if mode == 3 { return; }
-    let color = 0xff00_0000 | if mode == 0 { 0x303038 } else {
-        game.map_color_option("minimap_frame_color").unwrap_or(0x44444a)
-    };
-    let [x,y,w,h] = rect;
-    let thickness = if mode == 1 { 3. } else { 1. };
+/// The minimap's frame: four bevelled one-GUI bands, light on the top and left, dark on the
+/// bottom and right; the same colours make the ring of a round map.
+fn draw_minimap_frame(game: &Game<'_>, batch: &mut HudBatch, map: [f32; 4], round: bool) {
+    if game.map_option("minimap_frame") == Some(3) { return; }
     if round {
-        let center = [x+w/2.,y+h/2.];
-        let radius = w.min(h)/2. - thickness;
-        let ring = |step| {
-            let angle = std::f32::consts::TAU * step as f32 / 96.;
-            [center[0]+angle.cos()*radius, center[1]+angle.sin()*radius]
-        };
-        for step in 0..96 {
-            draw_line(game,batch,ring(step),ring(step+1),rect,color);
+        let steps = (map[2] * 0.75).clamp(48., 192.) as usize;
+        for (quad, color) in look::frame_ring(map, steps) {
+            game.native_quad(batch, quad, color);
         }
     } else {
-        for edge in [[x,y,w,thickness],[x,y+h-thickness,w,thickness],
-            [x,y+thickness,thickness,h-2.*thickness],[x+w-thickness,y+thickness,thickness,h-2.*thickness]] {
-            game.native_fill(batch,edge,color);
+        for (band, color) in look::frame_bands(map) {
+            game.native_fill(batch, band, color);
         }
     }
 }
@@ -5556,10 +4997,9 @@ fn draw(
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     let round = !large && settings.round;
     if large {
-        let background=if game.map_option("world_skip_render")==Some(1) {0xff181b20} else {0xef181b20};
-        game.native_fill(batch,rect,background);
+        game.native_fill(batch,rect,look::UNEXPLORED);
     } else if let Some(opacity)=game.map_option("minimap_undiscovered").filter(|v|*v>0) {
-        let color=(u32::from(opacity)*255/100)<<24 | 0x181b20;
+        let color=(u32::from(opacity)*255/100)<<24 | (look::UNEXPLORED & 0x00ff_ffff);
         if round {
             let center=[rect[0]+rect[2]*0.5,rect[1]+rect[3]*0.5];
             let point=|step| {
@@ -5568,8 +5008,6 @@ fn draw(
             };
             for i in 0..48 {game.native_quad(batch,[center,point(i),point(i+1),center],color);}
         } else {game.native_fill(batch,rect,color);}
-    } else if !round {
-        game.native_fill(batch,rect,0xef181b20);
     }
     let valid = state.frame.as_ref().filter(|f| {
         f.view.dimension == state.selected
@@ -5690,8 +5128,6 @@ fn draw(
         if game.map_option("light_overlay") == Some(1) {
             draw_light_overlay(game, batch, &frame.view, rect);
         }
-        let compass_front=large || game.map_option("minimap_compass_front")!=Some(0);
-        if !compass_front {draw_directions(game,batch,&frame.view,rect,round,large,&settings);}
         if large && game.map_option("map_server_radius")==Some(1)
             && let Some(remote)=&game.remote
             && let Some(player)=game.native_player()
@@ -5722,41 +5158,8 @@ fn draw(
             draw_portal_marker(game, batch, &frame.view, rect, *at, *kind);
         }
         if large {
-            let hover = state
-                .menu
-                .map(|menu| menu.block)
-                .or_else(|| mouse.and_then(|mouse| hovered_block(&frame.view, rect, mouse)));
-            if let Some(block) = hover {
+            if let Some(block) = state.menu.map(|menu| menu.block) {
                 highlight(game, batch, &frame.view, rect, block);
-            }
-            if let Some(menu) = state.menu {
-                let (chunk, region) = maps::chunk_region(menu.block);
-                draw_world_box(
-                    game,
-                    batch,
-                    &frame.view,
-                    rect,
-                    [
-                        f64::from(chunk[0] * 16),
-                        f64::from(chunk[1] * 16),
-                        f64::from(chunk[0] * 16 + 16),
-                        f64::from(chunk[1] * 16 + 16),
-                    ],
-                    0xffffd45c,
-                );
-                draw_world_box(
-                    game,
-                    batch,
-                    &frame.view,
-                    rect,
-                    [
-                        f64::from(region[0] * 512),
-                        f64::from(region[1] * 512),
-                        f64::from(region[0] * 512 + 512),
-                        f64::from(region[1] * 512 + 512),
-                    ],
-                    0xff58c7ff,
-                );
             }
         }
         for (index, waypoint) in state
@@ -5764,25 +5167,22 @@ fn draw(
             .iter()
             .enumerate()
             .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension && map_waypoint_visible(game, state, waypoint))
-            .filter(|_| game.map_option(if large {"world_map_waypoints"} else {"minimap_waypoints"}) != Some(0)
-                && (!large || f64::from(rect[2])/frame.view.span[0]>=game.map_number("world_waypoint_zoom_min").unwrap_or(0.)))
+            .filter(|_| large && game.map_option("world_map_waypoints") != Some(0)
+                && f64::from(rect[2])/frame.view.span[0]>=game.map_number("world_waypoint_zoom_min").unwrap_or(0.))
         {
-            let start = batch.vertices.len();
-            draw_waypoint(
+            draw_pennant(
                 game,
                 batch,
                 &frame.view,
                 rect,
                 waypoint,
                 &waypoint_text(state, index, waypoint),
-                if large {11.0*game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32}else{8.0*waypoint_scale(game,"waypoint_map_scale")},
+                game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32,
             );
-            if !large { set_opacity(batch,start,game.map_option("waypoint_map_opacity").unwrap_or(100)); }
         }
-        if let Some(player) = game.native_player() {
-            draw_marker(game, batch, &frame.view, rect, state.marker, &player);
+        if large && let Some(player) = game.native_player() {
+            draw_player(game, batch, &frame.view, rect, state.marker, &player, false);
         }
-        if compass_front {draw_directions(game,batch,&frame.view,rect,round,large,&settings);}
         if terrain_visible {
             return;
         }
@@ -6176,25 +5576,6 @@ fn export_map_png(game: &Game<'_>, state: &mut State, dimension: Dimension) {
     state.notice = Some((text, Instant::now()));
 }
 
-fn map_tools(width: f32) -> [[f32; 4]; 4] {
-    let w = ((width - 22.) / 4.).clamp(1., 100.);
-    std::array::from_fn(|i| [width - 8. - (4 - i) as f32 * w - (3 - i) as f32 * 2., 60., w, 20.])
-}
-
-fn map_panel_rows(height: f32) -> usize {
-    (((height - 186.) / 20.).floor() as usize).clamp(1, 12)
-}
-
-fn map_panel_rect(width: f32, height: f32) -> [f32; 4] {
-    let w = (width - 16.).clamp(1., 228.);
-    let body = 20. * map_panel_rows(height) as f32 + 24.;
-    [width - w - 8., 84., w, body + 26.]
-}
-
-fn map_panel_row(panel: [f32; 4], index: usize) -> [f32; 4] {
-    [panel[0] + 5., panel[1] + 24. + 20. * index as f32, (panel[2] - 10.).max(1.), 18.]
-}
-
 const SETTING_CATEGORIES: usize = 5;
 
 fn setting_category(key: &str) -> usize {
@@ -6213,51 +5594,24 @@ fn setting_category(key: &str) -> usize {
     }
 }
 
-fn setting_tabs() -> [&'static str; SETTING_CATEGORIES] {
-    [
-        tr("Minimap","Мини-карта","Mini-carte","Minimapa","Minikarte"),
-        tr("World map","Карта мира","Carte du monde","Mapa mundial","Weltkarte"),
-        tr("Waypoints","Метки","Repères","Marcadores","Wegpunkte"),
-        tr("Radar","Радар","Radar","Radar","Radar"),
-        tr("Other","Прочее","Autres","Otros","Sonstiges"),
-    ]
-}
+const CATEGORY_KEYS: [&str; SETTING_CATEGORIES] =
+    ["minimap_settings", "world_map_settings", "waypoint_settings", "radar_settings", "other_settings"];
 
+/// A category's settings, the main switches first (the minimap's own rows in their order),
+/// then the rest as registered.
 fn settings_catalog<'a>(game: &'a Game<'_>, category: usize) -> impl Iterator<Item=&'a horizon_client::mod_list::NativeSetting> {
-    game.settings.mods.installed.iter().find(|m|m.id==runtime::MOD_ID)
+    let mut rows: Vec<_> = game.settings.mods.installed.iter().find(|m|m.id==runtime::MOD_ID)
         .and_then(|m|m.native.as_ref()).into_iter()
         .flat_map(|page|page.settings.iter()).filter(move |row| setting_category(&row.key)==category)
-}
-
-fn settings_panel(w: f32, h: f32) -> [f32;4] {
-    let width = (w-20.).clamp(1.,670.);
-    let height = (h-24.).clamp(1.,600.);
-    [(w-width)*0.5,(h-height)*0.5,width,height]
-}
-
-fn settings_tab(panel:[f32;4],i:usize)->[f32;4] {
-    let width=(panel[2]-26.)/SETTING_CATEGORIES as f32;
-    [panel[0]+10.+(width+1.)*i as f32,panel[1]+27.,width,22.]
-}
-
-fn settings_rows(panel:[f32;4])->usize {
-    (((panel[3]-94.)/25.).floor() as usize).max(1)
-}
-
-fn settings_row(panel:[f32;4],i:usize)->([f32;4],[f32;4]) {
-    let row=[panel[0]+10.,panel[1]+56.+25.*i as f32,panel[2]-20.,22.];
-    let control=(row[2]*0.37).clamp(1.,210.);
-    (row,[row[0]+row[2]-control,row[1],control,row[3]])
-}
-
-fn settings_back(panel:[f32;4])->[f32;4] {
-    [panel[0]+panel[2]-100.,panel[1]+panel[3]-28.,90.,20.]
+        .collect();
+    rows.sort_by_key(|row| runtime::SDK_SETTING_ROWS.iter().position(|(key, _)| *key == row.key).unwrap_or(usize::MAX));
+    rows.into_iter()
 }
 
 fn setting_value(game: &Game<'_>, value:&horizon_client::mod_list::NativeSettingValue)->String {
     use horizon_client::mod_list::NativeSettingValue as Value;
     match value {
-        Value::Toggle(on) => if *on {tr("On","Вкл.","Oui","Sí","An")} else {tr("Off","Выкл.","Non","No","Aus")}.into(),
+        Value::Toggle(on) => ui(if *on { "on" } else { "off" }),
         Value::Choice { options, index } => options.get(*index)
             .map(|option| game.translate(option).unwrap_or_else(||option.clone())).unwrap_or_default(),
         Value::Range { value, .. } => format!("{value:.3}").trim_end_matches('0').trim_end_matches('.').to_owned(),
@@ -6265,50 +5619,216 @@ fn setting_value(game: &Game<'_>, value:&horizon_client::mod_list::NativeSetting
     }
 }
 
-fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    if state.settings_return==Some(Mode::Map) {
-        draw_map_screen(game,batch,state);
-    }
-    let panel=settings_panel(batch.width,batch.height);
-    let mouse=game.cursor();
-    game.native_fill(batch,[0.,0.,batch.width,batch.height],0xd710171e);
-    game.native_fill(batch,panel,0xff23303b);
-    game.native_fill(batch,[panel[0],panel[1],panel[2],2.],0xff62d0c2);
-    game.map_text(batch,tr("Map settings","Настройки карт","Paramètres des cartes","Ajustes del mapa","Karteneinstellungen"),
-        [panel[0]+10.,panel[1]+10.],0xffeaf1f6,true);
-    for (i,name) in setting_tabs().into_iter().enumerate() {
-        let rect=settings_tab(panel,i);
-        button(game,batch,rect,&fit_text(game,name,rect[2]-6.),mouse,true);
-        if state.settings_tab==i {
-            game.native_fill(batch,[rect[0],rect[1]+rect[3]-2.,rect[2],2.],0xff62d0c2);
-        }
-    }
-    let total=settings_catalog(game,state.settings_tab).count();
-    let count=settings_rows(panel);
-    let start=state.settings_scroll.min(total.saturating_sub(count));
-    for (i,setting) in settings_catalog(game,state.settings_tab).skip(start).take(count).enumerate() {
-        use horizon_client::mod_list::NativeSettingValue as Value;
-        let (row,control)=settings_row(panel,i);
-        game.native_fill(batch,row,0xff293745);
-        let label=game.translate(&setting.label).unwrap_or_else(||setting.key.replace('_'," "));
-        game.map_text(batch,&fit_text(game,&label,control[0]-row[0]-12.),[row[0]+6.,row[1]+7.],0xffe2edf5,false);
-        let value=setting_value(game,&setting.value);
-        button(game,batch,control,&fit_text(game,&value,control[2]-10.),mouse,true);
-        if matches!(setting.value,Value::Range {..}) {
-            let filled=(control[2]-8.)*setting.value.fraction();
-            game.native_fill(batch,[control[0]+4.,control[1]+18.,control[2]-8.,2.],0xff14202a);
-            game.native_fill(batch,[control[0]+4.,control[1]+18.,filled,2.],0xff62d0c2);
-        }
-        if let Value::Color(rgb)=setting.value {
-            game.native_fill(batch,[control[0]+5.,control[1]+6.,10.,10.],waypoint_argb(rgb));
-        }
-    }
-    let shown = if total == 0 {0} else {start+1};
-    game.map_text(batch,&format!("{shown}–{} / {total}",(start+count).min(total)),[panel[0]+10.,panel[1]+panel[3]-22.],0xffb9cbd8,false);
-    button(game,batch,settings_back(panel),tr("Back","Назад","Retour","Volver","Zurück"),mouse,true);
+/// What a settings button does.
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsTarget {
+    Category(usize),
+    WaypointList,
+    Caches,
+    Action(MenuAction),
+    /// The index of a setting in its category.
+    Setting(usize),
 }
 
-fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
+struct SettingsItem {
+    label: String,
+    tooltip: Option<String>,
+    /// A slider's position, for a range setting.
+    slider: Option<f32>,
+    /// A colour swatch, for a colour setting.
+    swatch: Option<u32>,
+    target: SettingsTarget,
+}
+
+/// Every button of the open settings page, before paging: the home page's categories and
+/// tools, or one category's settings as `Label: Value`.
+fn settings_items(game: &Game<'_>, state: &State) -> Vec<SettingsItem> {
+    let plain = |key: &str, target: SettingsTarget, tip: bool| SettingsItem {
+        label: ui(key),
+        tooltip: tip.then(|| ui(&format!("tip_{key}"))),
+        slider: None,
+        swatch: None,
+        target,
+    };
+    let Some(category) = state.settings_tab else {
+        let mut items: Vec<_> = CATEGORY_KEYS.iter().enumerate()
+            .map(|(i, key)| plain(key, SettingsTarget::Category(i), false))
+            .collect();
+        items.push(plain("waypoint_list", SettingsTarget::WaypointList, false));
+        items.push(plain("map_caches", SettingsTarget::Caches, true));
+        for (key, action) in [
+            ("import_waypoints", MenuAction::ImportXaero),
+            ("import_map_cache", MenuAction::ImportXaeroCache),
+            ("import_settings", MenuAction::ImportXaeroSettings),
+            ("next_profile", MenuAction::NextXaeroProfile),
+            ("reload_radar_rules", MenuAction::ReloadRadarRules),
+        ] {
+            items.push(plain(key, SettingsTarget::Action(action), true));
+        }
+        return items;
+    };
+    use horizon_client::mod_list::NativeSettingValue as Value;
+    settings_catalog(game, category).enumerate().map(|(i, setting)| {
+        let name = game.translate(&setting.label).unwrap_or_else(|| setting.key.replace('_', " "));
+        SettingsItem {
+            label: format!("{name}: {}", setting_value(game, &setting.value)),
+            tooltip: setting.tooltip.as_ref().and_then(|key| game.translate(key)).or(Some(name)),
+            slider: matches!(setting.value, Value::Range { .. }).then(|| setting.value.fraction()),
+            swatch: if let Value::Color(rgb) = setting.value { Some(rgb) } else { None },
+            target: SettingsTarget::Setting(i),
+        }
+    }).collect()
+}
+
+const SETTINGS_PAGE: usize = look::PAGE_ROWS * 2;
+
+fn settings_pages(items: usize) -> usize {
+    items.div_ceil(SETTINGS_PAGE).max(1)
+}
+
+/// A vanilla GUI sprite (`gui/sprites/<name>`) drawn nine-slice into `dst`. `width` is the
+/// sprite's size in GUI pixels as its `.mcmeta` gives it, so packs of any resolution fit.
+fn gui_sprite(game: &Game<'_>, batch: &mut HudBatch, name: &str, dst: [f32; 4], width: f32, border: f32) -> bool {
+    let key = format!("gui/sprites/{name}");
+    let Some(sprite) = game.gui.atlas.sprites.get(key.as_str()).copied() else { return false };
+    let size = [sprite.w as f32, sprite.h as f32];
+    let texels = (size[0] / width).max(1e-3);
+    for (src, piece) in look::nine_slice(dst, size, border * texels, 1. / texels) {
+        game.native_sprite(batch, &key, src, piece, None);
+    }
+    true
+}
+
+/// A vanilla button: the game's own button sprite and its label, white with shadow, grey when
+/// disabled.
+fn button(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], label: &str, mouse: [f32; 2], enabled: bool) {
+    let hovered = enabled && look::hit(mouse, rect);
+    let sprite = if !enabled { "widget/button_disabled" } else if hovered { "widget/button_highlighted" } else { "widget/button" };
+    if !gui_sprite(game, batch, sprite, rect, look::BUTTON[0], look::BUTTON_BORDER) {
+        game.native_fill(batch, rect, if hovered { 0xff7a7a7a } else { 0xff5a5a5a });
+    }
+    let text = fit_text(game, label, rect[2] - 6.);
+    let width = game.map_text_width(&text);
+    game.map_text(batch, &text, [(rect[0] + (rect[2] - width) * 0.5).round(), (rect[1] + (rect[3] - 8.) * 0.5).round()],
+        if enabled { look::SCREEN_TEXT } else { look::DISABLED_TEXT }, true);
+}
+
+/// A vanilla slider: its track, the handle at `fraction` and the centred label.
+fn slider(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], label: &str, fraction: f32, mouse: [f32; 2]) {
+    let hovered = look::hit(mouse, rect);
+    if !gui_sprite(game, batch, if hovered { "widget/slider_highlighted" } else { "widget/slider" }, rect, look::BUTTON[0], 1.) {
+        game.native_fill(batch, rect, 0xff000000);
+    }
+    let handle = [rect[0] + (rect[2] - 8.) * fraction.clamp(0., 1.), rect[1], 8., rect[3]];
+    let name = if hovered { "gui/sprites/widget/slider_handle_highlighted" } else { "gui/sprites/widget/slider_handle" };
+    if let Some(sprite) = game.gui.atlas.sprites.get(name).copied() {
+        game.native_sprite(batch, name, [0., 0., sprite.w as f32, sprite.h as f32], handle, None);
+    }
+    let text = fit_text(game, label, rect[2] - 6.);
+    let width = game.map_text_width(&text);
+    game.map_text(batch, &text, [(rect[0] + (rect[2] - width) * 0.5).round(), (rect[1] + 6.).round()], look::SCREEN_TEXT, true);
+}
+
+/// A vanilla edit box: the text field sprite, the text (or a grey hint) and a cursor while
+/// focused. Long text shows its end.
+fn draw_field(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], text: &str, hint: &str, focused: bool) {
+    let sprite = if focused { "widget/text_field_highlighted" } else { "widget/text_field" };
+    if !gui_sprite(game, batch, sprite, rect, look::BUTTON[0], look::FIELD_BORDER) {
+        game.native_fill(batch, rect, if focused { 0xffffffff } else { 0xffa0a0a0 });
+        game.native_fill(batch, [rect[0] + 1., rect[1] + 1., rect[2] - 2., rect[3] - 2.], 0xff000000);
+    }
+    let y = (rect[1] + (rect[3] - 8.) * 0.5).round();
+    let room = rect[2] - 10.;
+    if text.is_empty() && !focused {
+        let hint = fit_text(game, hint, room);
+        let x = if runtime::right_to_left() { rect[0] + rect[2] - 4. - game.map_text_width(&hint) } else { rect[0] + 4. };
+        game.map_text(batch, &hint, [x, y], look::HINT_TEXT, false);
+        return;
+    }
+    let mut shown: String = text.to_owned();
+    while game.map_text_width(&shown) > room && !shown.is_empty() {
+        shown.remove(0);
+    }
+    if focused { shown.push('_'); }
+    let x = if runtime::right_to_left() { rect[0] + rect[2] - 4. - game.map_text_width(&shown) } else { rect[0] + 4. };
+    draw_text(game, batch, &shown, [x, y], 0xffe0e0e0, true);
+}
+
+/// The title line of a vanilla screen, centred.
+fn screen_title(game: &Game<'_>, batch: &mut HudBatch, text: &str, y: f32) {
+    let width = game.map_text_width(text);
+    game.map_text(batch, text, [((batch.width - width) * 0.5).round(), y], look::SCREEN_TEXT, true);
+}
+
+/// Whether the world map lies behind the open screen.
+fn map_behind(state: &State) -> bool {
+    match state.mode {
+        Mode::Map => true,
+        Mode::Settings => state.settings_return == Some(Mode::Map),
+        Mode::Name => state.name_form.as_ref().is_some_and(|form| form.background == Mode::Map),
+        _ => false,
+    }
+}
+
+/// The world map's terrain, darkened, behind a screen opened from it.
+fn draw_map_backdrop(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    draw(game, batch, state, rectangle(batch.width, batch.height), true, None);
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xa0101010);
+}
+
+/// Whether the open screen shows the world behind it, blurred as vanilla screens do.
+pub(super) fn blurs_world(game: &Game<'_>) -> bool {
+    game.map_on(runtime::MOD_ID) && game.mod_screen() == Some(runtime::MOD_ID) && !map_behind(&state())
+}
+
+fn draw_settings(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    if state.settings_return==Some(Mode::Map) {
+        draw_map_backdrop(game,batch,state);
+    }
+    let size = [batch.width, batch.height];
+    let rtl = runtime::right_to_left();
+    let mouse = game.cursor();
+    let items = settings_items(game, state);
+    let pages = settings_pages(items.len());
+    let page = state.settings_scroll.min(pages - 1);
+    let title = match state.settings_tab {
+        None => ui("map_settings"),
+        Some(category) if pages > 1 => format!("{} ({}/{pages})", ui(CATEGORY_KEYS[category]), page + 1),
+        Some(category) => ui(CATEGORY_KEYS[category]),
+    };
+    screen_title(game, batch, &title, look::screen_title_y(batch.height));
+    let shown: Vec<_> = items.iter().skip(page * SETTINGS_PAGE).take(SETTINGS_PAGE).collect();
+    let (rects, back) = look::settings_grid(size, shown.len(), rtl);
+    let mut tooltip = None;
+    for (item, rect) in shown.iter().zip(rects) {
+        match item.slider {
+            Some(fraction) => slider(game, batch, rect, &item.label, fraction, mouse),
+            None => button(game, batch, rect, &item.label, mouse, true),
+        }
+        if let Some(rgb) = item.swatch {
+            let at = if rtl { rect[0] + 4. } else { rect[0] + rect[2] - 14. };
+            game.native_fill(batch, [at, rect[1] + 5., 10., 10.], 0xff000000);
+            game.native_fill(batch, [at + 1., rect[1] + 6., 8., 8.], waypoint_argb(rgb));
+        }
+        if look::hit(mouse, rect) {
+            tooltip = item.tooltip.clone();
+        }
+    }
+    if pages > 1 {
+        let [prev, next] = look::pager(size, rtl);
+        // The arrows point the way the pages turn: outward, mirrored right to left.
+        let (back_arrow, on_arrow) = if rtl { (">>", "<<") } else { ("<<", ">>") };
+        button(game, batch, prev, &format!("{back_arrow} {}", ui("previous")), mouse, page > 0);
+        button(game, batch, next, &format!("{} {on_arrow}", ui("next")), mouse, page + 1 < pages);
+    }
+    button(game, batch, back, &ui(if state.settings_tab.is_none() { "done" } else { "back" }), mouse, true);
+    draw_notice(game, batch, state);
+    if let Some(text) = tooltip {
+        draw_tooltip(game, batch, &text, mouse);
+    }
+}
+
+fn open_settings(state:&mut State, back:Option<Mode>, tab:Option<usize>) {
     state.settings_return=back;
     state.settings_tab=tab;
     state.settings_scroll=0;
@@ -6320,166 +5840,470 @@ fn open_settings(state:&mut State, back:Option<Mode>, tab:usize) {
 }
 
 fn close_settings(state:&mut State) {
+    if state.settings_tab.take().is_some() {
+        state.settings_scroll = 0;
+        return;
+    }
     if let Some(mode)=state.settings_return.take() {state.mode=mode;} else {state.close=true;}
+}
+
+/// A menu with no point of its own, for the actions the settings home page runs.
+fn home_menu(state: &State) -> Menu {
+    Menu {
+        height_approximate: false,
+        block: [0, 0],
+        height: None,
+        fluid: None,
+        dimension: state.selected,
+        at: [0., 0.],
+        portal: None,
+        waypoint: None,
+        radar_player: None,
+    }
 }
 
 fn settings_press(game:&Game<'_>, state:&mut State, screen:&mod_api::ScreenView<'_>, button:i32) {
     if !matches!(button,0|1) {return;}
-    let panel=settings_panel(screen.rect[2],screen.rect[3]);
+    let size = [screen.rect[2], screen.rect[3]];
+    let rtl = runtime::right_to_left();
     let mouse=screen.mouse;
-    if button==0 && inside(mouse,settings_back(panel)) {close_settings(state);return;}
-    if button==0 && let Some(i)=(0..SETTING_CATEGORIES).find(|i|inside(mouse,settings_tab(panel,*i))) {
-        state.settings_tab=i;
-        state.settings_scroll=0;
+    let items = settings_items(game, state);
+    let pages = settings_pages(items.len());
+    let page = state.settings_scroll.min(pages - 1);
+    let shown: Vec<_> = items.iter().skip(page * SETTINGS_PAGE).take(SETTINGS_PAGE).collect();
+    let (rects, back) = look::settings_grid(size, shown.len(), rtl);
+    if button == 0 && look::hit(mouse, back) { close_settings(state); return; }
+    if button == 0 && pages > 1 {
+        let [prev, next] = look::pager(size, rtl);
+        if look::hit(mouse, prev) && page > 0 { state.settings_scroll = page - 1; return; }
+        if look::hit(mouse, next) && page + 1 < pages { state.settings_scroll = page + 1; return; }
+    }
+    let Some((item, rect)) = shown.iter().zip(rects).find(|(_, rect)| look::hit(mouse, *rect)) else { return };
+    match item.target {
+        SettingsTarget::Category(i) if button == 0 => { state.settings_tab = Some(i); state.settings_scroll = 0; }
+        SettingsTarget::WaypointList if button == 0 => { state.settings_return = None; state.mode = Mode::Waypoints; state.waypoint_scroll = 0; }
+        SettingsTarget::Caches if button == 0 => show_cache_manager(game, state),
+        SettingsTarget::Action(action) if button == 0 => {
+            if game.native_player().is_some() {
+                let menu = home_menu(state);
+                perform_menu(game, state, menu, action);
+            }
+        }
+        SettingsTarget::Setting(index) => {
+            let Some(category) = state.settings_tab else { return };
+            let Some(row) = settings_catalog(game, category).nth(index) else { return };
+            use horizon_client::mod_list::NativeSettingValue as Value;
+            let mut next = row.value.clone();
+            match &mut next {
+                Value::Range {..} => next.slide((mouse[0] - rect[0] - 4.) / (rect[2] - 8.).max(1.)),
+                Value::Choice { options,index } if button==1 && !options.is_empty() => {
+                    *index=(*index+options.len()-1)%options.len();
+                }
+                _ if button == 0 => next.click(),
+                _ => return,
+            }
+            let value = match next {
+                Value::Toggle(value)=>value.to_string(),
+                Value::Choice {index,..}=>index.to_string(),
+                Value::Range {value,..}=>value.to_string(),
+                Value::Color(rgb)=>rgb.to_string(),
+            };
+            state.map_settings_change=Some((row.key.clone(),value));
+        }
+        _ => {}
+    }
+}
+
+// Interface text from the lang files (`map.ui.<key>`); English is the fallback the en_us
+/// file also holds.
+fn ui(key: &str) -> String {
+    let full = format!("map.ui.{key}");
+    let text = horizon_client::lang::get_or(&full, "");
+    if text.is_empty() { key.replace('_', " ") } else { text }
+}
+
+/// Text that keeps its left-to-right order: in a right-to-left language the renderer would
+/// reverse a line without letters (`-32, 69, 0` becoming `0 ,69 ,32-`), so such a line is laid
+/// out one character at a time.
+fn draw_text(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2], color: u32, shadow: bool) {
+    if !runtime::right_to_left() || text.chars().any(char::is_alphabetic) {
+        game.map_text(batch, text, at, color, shadow);
         return;
     }
-    let total=settings_catalog(game,state.settings_tab).count();
-    let count=settings_rows(panel);
-    let start=state.settings_scroll.min(total.saturating_sub(count));
-    let Some((i,row))=settings_catalog(game,state.settings_tab).skip(start).take(count)
-        .enumerate().find(|(i,_)|inside(mouse,settings_row(panel,*i).0))
-    else {return;};
-    use horizon_client::mod_list::NativeSettingValue as Value;
-    let (_,control)=settings_row(panel,i);
-    let mut next=row.value.clone();
-    match &mut next {
-        Value::Range {..} => {
-            if !inside(mouse,control) {return;}
-            next.slide((mouse[0]-control[0]-4.)/(control[2]-8.).max(1.));
-        }
-        Value::Choice { options,index } if button==1 && !options.is_empty() => {
-            *index=(*index+options.len()-1)%options.len();
-        }
-        _=>next.click(),
+    let mut x = at[0];
+    let mut buffer = [0u8; 4];
+    for c in text.chars() {
+        let glyph: &str = c.encode_utf8(&mut buffer);
+        game.map_text(batch, glyph, [x, at[1]], color, shadow);
+        x += game.map_text_width(glyph);
     }
-    let value = match next {
-        Value::Toggle(value)=>value.to_string(),
-        Value::Choice {index,..}=>index.to_string(),
-        Value::Range {value,..}=>value.to_string(),
-        Value::Color(rgb)=>rgb.to_string(),
-    };
-    state.map_settings_change=Some((row.key.clone(),value));
 }
 
-fn draw_map_tools(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32;2]) {
-    let labels = [
-        tr("Waypoints","Метки","Repères","Marcadores","Wegpunkte"),
-        tr("Center on me","К игроку","Recentrer","Centrar","Zu mir"),
-        tr("Settings","Настройки","Paramètres","Ajustes","Einstellungen"),
-        tr("Export PNG","Экспорт PNG","Exporter PNG","Exportar PNG","PNG-Export"),
-    ];
-    for ((i, rect), label) in map_tools(batch.width).into_iter().enumerate().zip(labels) {
-        let active = i==0 && state.map_panel==MapPanel::Waypoints;
-        if active {
-            game.native_fill(batch, [rect[0], rect[1] - 2., rect[2], 2.], 0xff62d0c2);
-        }
-        button(game,batch,rect,&fit_text(game,label,rect[2]-6.),mouse,true);
-    }
-    let panel = map_panel_rect(batch.width,batch.height);
-    let title = match state.map_panel {
-        MapPanel::None => return,
-        MapPanel::Waypoints => labels[0],
-    };
-    game.native_fill(batch,panel,0xf5212e39);
-    game.native_fill(batch,[panel[0],panel[1],2.,panel[3]],0xff62d0c2);
-    game.map_text(batch,title,[panel[0]+7.,panel[1]+7.],0xffe6f0f4,true);
-    let count = map_panel_rows(batch.height);
-    for (i, (_,waypoint)) in shown_waypoints(state).skip(state.map_panel_scroll).take(count).enumerate() {
-        let row=map_panel_row(panel,i);
-        game.native_fill(batch,row,if inside(mouse,row) {0xff395469} else {0xff293c4e});
-        game.native_fill(batch,[row[0]+4.,row[1]+5.,8.,8.],waypoint_argb(waypoint.color));
-        let name=fit_text(game,&waypoint.name,row[2]-20.);
-        game.map_text(batch,&name,[row[0]+17.,row[1]+5.],0xffeef5f8,true);
-        if inside(mouse,row)
-            && let Some(frame) = state.frame.as_ref().filter(|f| f.view.large && f.view.dimension == waypoint.dimension)
-        {
-            let rect = rectangle(batch.width,batch.height);
-            let at = world_screen(&frame.view,rect,[f64::from(waypoint.x)+0.5,f64::from(waypoint.z)+0.5]);
-            if inside(at,rect) && !inside(at,panel) {
-                game.native_fill(batch,[at[0]-14.,at[1]-1.,6.,2.],0xff6ce1d5);
-                game.native_fill(batch,[at[0]+8.,at[1]-1.,6.,2.],0xff6ce1d5);
-            }
-        }
-    }
-    if shown_waypoints(state).next().is_none() {
-        game.map_text(batch,tr("No waypoints","Нет меток","Aucun repère","Sin marcadores","Keine Wegpunkte"),
-            [panel[0]+8.,panel[1]+29.],0xffb4c6d2,true);
-    }
-    let row = map_panel_row(panel,count);
-    button(game,batch,row,tr("Manage waypoints…","Управление метками…","Gérer les repères…","Gestionar marcadores…","Wegpunkte verwalten…"),mouse,true);
+/// A line's segments in reading order: reversed right to left, so a key name follows its
+/// label there too.
+fn reading_order<T: Clone>(parts: &[T]) -> Vec<T> {
+    let mut parts = parts.to_vec();
+    if runtime::right_to_left() { parts.reverse(); }
+    parts
 }
 
-fn map_tools_press(game: &Game<'_>, state: &mut State, screen: &mod_api::ScreenView<'_>, button: i32) -> bool {
-    let [w,h] = [screen.rect[2],screen.rect[3]];
-    let mouse = screen.mouse;
-    if let Some(i) = map_tools(w).into_iter().position(|rect| inside(mouse,rect)) {
-        state.dragging = false;
-        if button != 0 { return true; }
-        match i {
-            0 => { state.map_panel.toggle(MapPanel::Waypoints); state.map_panel_scroll = 0; }
-            1 => {
-                if let Some(player) = game.native_player() {
-                    let dimension = Dimension::from_id(player.dimension);
-                    state.camera.snap(dimension.convert(state.selected,[player.x,player.z]));
-                    state.elapsed=1.;
-                }
+/// A tooltip: one or more lines of segments, each with its own colour (keys are green).
+fn draw_tooltip_lines(game: &Game<'_>, batch: &mut HudBatch, lines: &[Vec<(String, u32)>], at: [f32; 2]) {
+    if lines.is_empty() {
+        return;
+    }
+    let width = lines.iter()
+        .map(|line| line.iter().map(|(text, _)| game.map_text_width(text)).sum::<f32>())
+        .fold(0., f32::max);
+    let height = lines.len() as f32 * look::INFO_PITCH - 1.;
+    let rect = look::tooltip_box(at, [width, height], [batch.width, batch.height]);
+    game.native_fill(batch, rect, look::TOOLTIP_BOX);
+    let rtl = runtime::right_to_left();
+    for (row, line) in lines.iter().enumerate() {
+        let line_width: f32 = line.iter().map(|(text, _)| game.map_text_width(text)).sum();
+        let mut x = if rtl { rect[0] + rect[2] - 3. - line_width } else { rect[0] + 3. };
+        for (text, color) in reading_order(line) {
+            draw_text(game, batch, &text, [x, rect[1] + 2. + row as f32 * look::INFO_PITCH], color, true);
+            x += game.map_text_width(&text);
+        }
+    }
+}
+
+fn draw_tooltip(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2]) {
+    draw_tooltip_lines(game, batch, &[vec![(text.to_owned(), look::TOOLTIP_TEXT)]], at);
+}
+
+/// A bare glyph with its shadow one pixel down and right.
+fn draw_glyph(game: &Game<'_>, batch: &mut HudBatch, rows: &[&str], cell: [f32; 4], color: u32) {
+    let origin = look::glyph_origin(cell, rows);
+    for run in look::glyph_runs(rows, [origin[0] + 1., origin[1] + 1.]) {
+        game.native_fill(batch, run, look::GLYPH_SHADOW);
+    }
+    for run in look::glyph_runs(rows, origin) {
+        game.native_fill(batch, run, color);
+    }
+}
+
+/// A key's name for a tooltip, or nothing when it is unbound.
+fn key_name(game: &Game<'_>, id: &str, default: &str) -> Option<String> {
+    let key = game.map_key(runtime::MOD_ID, id, default);
+    if key.ends_with(".unknown") || key.is_empty() {
+        return None;
+    }
+    let name = horizon_client::lang::get_or(&key, "");
+    Some(if name.is_empty() {
+        key.rsplit('.').next().unwrap_or(&key).to_uppercase()
+    } else { name })
+}
+
+/// Whether a world-map control's switch is on (`None` for a plain action).
+fn control_on(game: &Game<'_>, state: &State, control: look::Control) -> Option<bool> {
+    let flag = |key: &str, default: bool| game.map_option(key).map_or(default, |v| v == 1);
+    match control {
+        look::Control::WaypointMenu => Some(state.map_panel == MapPanel::Waypoints),
+        look::Control::Waypoints => Some(flag("world_map_waypoints", true)),
+        look::Control::TrackedPlayers => Some(flag("radar_locator", false)),
+        look::Control::Radar => Some(flag("radar_world_map", true) && flag("radar", true)),
+        look::Control::CaveMode => Some(flag("world_cave_enabled", true)),
+        _ => None,
+    }
+}
+
+/// The controls shown: the zoom pair follows its setting.
+fn world_controls(game: &Game<'_>, size: [f32; 2]) -> Vec<(look::Control, [f32; 4])> {
+    let zoom = game.map_option("world_zoom_buttons") != Some(0);
+    look::world_controls(size, runtime::right_to_left()).into_iter()
+        .filter(|(control, _)| zoom || !matches!(control, look::Control::ZoomIn | look::Control::ZoomOut))
+        .collect()
+}
+
+fn control_tooltip(game: &Game<'_>, state: &State, control: look::Control) -> Vec<Vec<(String, u32)>> {
+    let white = look::TOOLTIP_TEXT;
+    let line = |text: String| vec![(text, white)];
+    let switch = |key: &str| {
+        let on = control_on(game, state, control).unwrap_or(false);
+        line(format!("{}: {}", ui(key), ui(if on { "on" } else { "off" })))
+    };
+    match control {
+        look::Control::Settings => vec![line(ui("settings"))],
+        look::Control::MapSwitching => vec![line(ui("map_caches"))],
+        look::Control::CaveMode => vec![switch("cave_mode")],
+        look::Control::Dimension => vec![line(format!("{}: {}", ui("dimension"), state.selected.label()))],
+        look::Control::HopTo => vec![line(ui("hop_to_waypoint"))],
+        look::Control::Camera => vec![line(ui("centre_on_player"))],
+        look::Control::WaypointMenu => vec![line(ui(if state.map_panel == MapPanel::Waypoints { "close_mini_menu" } else { "open_mini_menu" }))],
+        look::Control::Waypoints => vec![switch("waypoints")],
+        look::Control::TrackedPlayers => vec![switch("tracked_players")],
+        look::Control::Radar => vec![switch("entity_radar")],
+        look::Control::ExportPng => vec![line(ui("export_png"))],
+        look::Control::ZoomOut => vec![line(ui("zoom_out"))],
+        look::Control::ZoomIn => vec![line(ui("zoom_in"))],
+        look::Control::Help => {
+            let mut lines = vec![line(ui("help_drag")), line(ui("help_wheel")), line(ui("help_right_click"))];
+            for (id, default, label) in [
+                ("create_waypoint", "key.keyboard.b", "help_new_waypoint"),
+                (runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT, "help_waypoints"),
+                (runtime::WORLD_MAP_KEY, runtime::WORLD_MAP_DEFAULT, "help_close_map"),
+            ] {
+                let key = key_name(game, id, default).unwrap_or_else(|| ui("unset"));
+                lines.push(vec![(format!("{} ", ui(label)), white), (format!("({key})"), look::KEY_TEXT)]);
             }
-            2 => open_settings(state,Some(Mode::Map),1),
-            3 => export_map_png(game,state,state.selected),
-            _ => {}
+            lines
+        }
+    }
+}
+
+fn draw_world_controls(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Vec<Vec<(String, u32)>>> {
+    let mut tooltip = None;
+    for (control, cell) in world_controls(game, [batch.width, batch.height]) {
+        let hovered = look::hit(mouse, cell);
+        let color = match control_on(game, state, control) {
+            Some(false) => look::GLYPH_OFF,
+            _ if hovered => look::GLYPH_HOVER,
+            _ => look::GLYPH,
+        };
+        draw_glyph(game, batch, look::glyph(control), cell, color);
+        if hovered {
+            tooltip = Some(control_tooltip(game, state, control));
+        }
+    }
+    tooltip
+}
+
+fn toggle_setting(game: &Game<'_>, state: &mut State, key: &str, default: bool) {
+    let on = game.map_option(key).map_or(default, |v| v == 1);
+    state.map_settings_change = Some((key.to_owned(), (!on).to_string()));
+}
+
+fn press_world_control(game: &Game<'_>, state: &mut State, control: look::Control) {
+    match control {
+        look::Control::Settings => open_settings(state, Some(Mode::Map), None),
+        look::Control::MapSwitching => show_cache_manager(game, state),
+        look::Control::CaveMode => toggle_setting(game, state, "world_cave_enabled", true),
+        look::Control::Dimension => {
+            let i = Dimension::ALL.iter().position(|d| *d == state.selected).unwrap_or(0);
+            let next = Dimension::ALL[(i % 3) + 1];
+            runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true, next);
+        }
+        look::Control::HopTo => {
+            let points: Vec<_> = state.waypoints.iter()
+                .filter(|point| point.dimension == state.selected && map_waypoint_visible(game, state, point))
+                .map(|point| [f64::from(point.x) + 0.5, f64::from(point.z) + 0.5])
+                .collect();
+            if !points.is_empty() {
+                state.hop = (state.hop + 1) % points.len();
+                state.camera.snap(points[state.hop]);
+                state.elapsed = 1.;
+            }
+        }
+        look::Control::Camera => {
+            if let Some(player) = game.native_player() {
+                let dimension = Dimension::from_id(player.dimension);
+                state.camera.snap(dimension.convert(state.selected, [player.x, player.z]));
+                state.elapsed = 1.;
+            }
+        }
+        look::Control::WaypointMenu => {
+            state.map_panel.toggle(MapPanel::Waypoints);
+            state.map_panel_scroll = 0;
+            state.mini_filter_focus = false;
+            runtime::set_text_input(false);
+        }
+        look::Control::Waypoints => toggle_setting(game, state, "world_map_waypoints", true),
+        look::Control::TrackedPlayers => toggle_setting(game, state, "radar_locator", false),
+        look::Control::Radar => toggle_setting(game, state, "radar_world_map", true),
+        look::Control::ExportPng => export_map_png(game, state, state.selected),
+        look::Control::Help => {}
+        look::Control::ZoomOut => map_zoom(game, state, -1., [0., 0.]),
+        look::Control::ZoomIn => map_zoom(game, state, 1., [0., 0.]),
+    }
+}
+
+/// The mini-menu's waypoints, filtered by its box.
+fn mini_waypoints<'a>(state: &'a State) -> Vec<(usize, &'a Waypoint)> {
+    let query = state.mini_filter.trim().to_lowercase();
+    shown_waypoints(state)
+        .filter(|(_, point)| point.dimension == state.selected)
+        .filter(|(_, point)| query.is_empty() || point.name.to_lowercase().contains(&query))
+        .collect()
+}
+
+fn mini_toggle_on(game: &Game<'_>, state: &State, toggle: look::MiniToggle) -> bool {
+    match toggle {
+        look::MiniToggle::FullMenu => true,
+        look::MiniToggle::AllSets => game.map_option("all_waypoint_groups") == Some(1),
+        look::MiniToggle::Backgrounds => game.map_option("world_waypoint_backgrounds") != Some(0),
+        look::MiniToggle::Deathpoints => game.map_option("old_deathpoints") != Some(0),
+        look::MiniToggle::CloseOnHop => state.close_on_hop,
+    }
+}
+
+fn mini_toggle_label(toggle: look::MiniToggle) -> &'static str {
+    match toggle {
+        look::MiniToggle::FullMenu => "full_waypoint_menu",
+        look::MiniToggle::AllSets => "all_sets",
+        look::MiniToggle::Backgrounds => "waypoint_backgrounds",
+        look::MiniToggle::Deathpoints => "old_deathpoints",
+        look::MiniToggle::CloseOnHop => "close_on_hop",
+    }
+}
+
+/// A black bar (a vanilla dropdown or value) with centred text.
+fn draw_bar(game: &Game<'_>, batch: &mut HudBatch, rect: [f32; 4], text: &str, color: u32, hovered: bool) {
+    game.native_fill(batch, rect, if hovered { 0xFFA0_A0A0 } else { look::BAR_EDGE });
+    game.native_fill(batch, [rect[0] + 1., rect[1] + 1., rect[2] - 2., rect[3] - 2.], look::BAR);
+    let text = fit_text(game, text, rect[2] - 6.);
+    let width = game.map_text_width(&text);
+    game.map_text(batch, &text, [(rect[0] + (rect[2] - width) * 0.5).round(), rect[1] + 2.], color, true);
+}
+
+/// A waypoint's initial square: its colour with the white initial, a skull for a death point.
+fn draw_initial(game: &Game<'_>, batch: &mut HudBatch, square: [f32; 4], waypoint: &Waypoint, letter: &str) {
+    let centre = [square[0] + square[2] * 0.5, square[1] + square[3] * 0.5];
+    if waypoint.icon == runtime::WaypointIcon::Skull {
+        game.native_fill(batch, square, look::DEATH_FILL);
+        draw_skull(game, batch, centre, square[2] * 0.8);
+        return;
+    }
+    let width = game.map_text_width(letter);
+    let side = square[2].max(width + 2.);
+    game.native_fill(batch, [centre[0] - side * 0.5, square[1], side, square[3]],
+        waypoint_argb(if waypoint.color == 0 { 0xffffff } else { waypoint.color }));
+    game.map_text(batch, letter, [(centre[0] - width * 0.5).round(), (centre[1] - 4.).round()], look::INITIAL_TEXT, true);
+}
+
+fn draw_mini_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State, mouse: [f32; 2]) -> Option<Vec<Vec<(String, u32)>>> {
+    if state.map_panel != MapPanel::Waypoints {
+        return None;
+    }
+    let rtl = runtime::right_to_left();
+    let points = mini_waypoints(state);
+    let fit = look::mini_menu_rows(batch.height);
+    let paged = points.len() > fit;
+    let room = if paged { fit.saturating_sub(2) } else { fit };
+    let start = state.map_panel_scroll.min(points.len().saturating_sub(room));
+    let shown = points.len().min(room) + if paged { 2 } else { 0 };
+    let menu = look::mini_menu([batch.width, batch.height], shown, rtl);
+    // Rows run bottom-up from the set bar; the first rect is the lowest.
+    let mut rows = menu.rows.iter().copied();
+    let mut tooltip = None;
+    let row_text = |game: &Game<'_>, batch: &mut HudBatch, row: [f32; 4], text: &str, color: u32| {
+        let text = fit_text(game, text, row[2] - 14.);
+        let width = game.map_text_width(&text);
+        let x = if rtl { row[0] + 12. } else { row[0] + row[2] - 12. - width };
+        game.map_text(batch, &text, [x, row[1] + 1.], color, true);
+    };
+    if paged && let Some(row) = rows.next() {
+        let color = if look::hit(mouse, row) { look::SCREEN_TEXT } else { look::GREY_TEXT };
+        row_text(game, batch, row, &format!("[{}] ▽", ui("go_down")), color);
+    }
+    for ((index, point), row) in points.iter().skip(start).take(room).zip(rows.by_ref()) {
+        let square = if rtl { [row[0], row[1], 9., 9.] } else { [row[0] + row[2] - 9., row[1], 9., 9.] };
+        draw_initial(game, batch, square, point, &waypoint_text(state, *index, point));
+        let hovered = look::hit(mouse, row);
+        row_text(game, batch, row, &point.name, if hovered { 0xFFFF_FFA0 } else { look::SCREEN_TEXT });
+        if hovered {
+            tooltip = Some(vec![vec![(format!("{}, {}, {}", point.x, point.y, point.z), look::TOOLTIP_TEXT)]]);
+        }
+    }
+    if paged && let Some(row) = rows.next() {
+        let color = if look::hit(mouse, row) { look::SCREEN_TEXT } else { look::GREY_TEXT };
+        row_text(game, batch, row, &format!("[{}] △", ui("go_up")), color);
+    }
+    draw_bar(game, batch, menu.set, &group_label(state.waypoint_group.as_deref()), look::SCREEN_TEXT, look::hit(mouse, menu.set));
+    draw_field(game, batch, menu.filter, &state.mini_filter, &ui("filter_waypoints"), state.mini_filter_focus);
+    for (toggle, cell) in look::MINI_TOGGLES.into_iter().zip(menu.toggles) {
+        let hovered = look::hit(mouse, cell);
+        let color = if !mini_toggle_on(game, state, toggle) { look::GLYPH_OFF } else if hovered { look::GLYPH_HOVER } else { look::GLYPH };
+        draw_glyph(game, batch, look::mini_glyph(toggle), cell, color);
+        if hovered {
+            let on = mini_toggle_on(game, state, toggle);
+            let text = if toggle == look::MiniToggle::FullMenu { ui(mini_toggle_label(toggle)) }
+                else { format!("{}: {}", ui(mini_toggle_label(toggle)), ui(if on { "on" } else { "off" })) };
+            tooltip = Some(vec![vec![(text, look::TOOLTIP_TEXT)]]);
+        }
+    }
+    tooltip
+}
+
+/// Handles a press on the mini-menu; true when it took it.
+fn mini_menu_press(game: &Game<'_>, state: &mut State, mouse: [f32; 2], size: [f32; 2]) -> bool {
+    if state.map_panel != MapPanel::Waypoints {
+        return false;
+    }
+    let rtl = runtime::right_to_left();
+    let points: Vec<_> = mini_waypoints(state).into_iter().map(|(_, p)| (p.key(), [f64::from(p.x) + 0.5, f64::from(p.z) + 0.5])).collect();
+    let fit = look::mini_menu_rows(size[1]);
+    let paged = points.len() > fit;
+    let room = if paged { fit.saturating_sub(2) } else { fit };
+    let start = state.map_panel_scroll.min(points.len().saturating_sub(room));
+    let shown = points.len().min(room) + if paged { 2 } else { 0 };
+    let menu = look::mini_menu(size, shown, rtl);
+    state.mini_filter_focus = look::hit(mouse, menu.filter);
+    runtime::set_text_input(state.mini_filter_focus);
+    if state.mini_filter_focus {
+        return true;
+    }
+    if look::hit(mouse, menu.set) {
+        let groups = waypoint_groups(game, state);
+        let i = groups.iter().position(|g| *g == state.waypoint_group).unwrap_or(0);
+        state.waypoint_group = groups[(i + 1) % groups.len()].clone();
+        runtime::initialize(game.native_data_dir(runtime::MOD_ID)).select_waypoint_group(&state.world, state.waypoint_group.as_deref());
+        state.map_panel_scroll = 0;
+        return true;
+    }
+    if let Some(toggle) = look::MINI_TOGGLES.into_iter().zip(menu.toggles).find(|(_, cell)| look::hit(mouse, *cell)).map(|(t, _)| t) {
+        match toggle {
+            look::MiniToggle::FullMenu => { state.mode = Mode::Waypoints; state.waypoint_scroll = 0; }
+            look::MiniToggle::AllSets => toggle_setting(game, state, "all_waypoint_groups", false),
+            look::MiniToggle::Backgrounds => toggle_setting(game, state, "world_waypoint_backgrounds", true),
+            look::MiniToggle::Deathpoints => toggle_setting(game, state, "old_deathpoints", true),
+            look::MiniToggle::CloseOnHop => state.close_on_hop = !state.close_on_hop,
         }
         return true;
     }
-    if state.map_panel == MapPanel::None { return false; }
-    let panel = map_panel_rect(w,h);
-    if !inside(mouse,panel) { return false; }
-    state.dragging=false;
-    if button != 0 { return true; }
-        let n = map_panel_rows(h);
-        if inside(mouse,map_panel_row(panel,n)) {
-            state.map_panel=MapPanel::None;
-            state.mode=Mode::Waypoints;
-            state.waypoint_scroll=0;
-        } else {
-            let key = shown_waypoints(state).skip(state.map_panel_scroll).take(n).enumerate()
-                .find_map(|(i,(_,point))| inside(mouse,map_panel_row(panel,i)).then(||point.key()));
-            if let Some(key) = key {
-                state.waypoint_selected=Some(key);
-                if let Some(dimension) = show_selected_waypoint(state) {
-                    runtime::initialize(game.native_data_dir(runtime::MOD_ID)).choose_dimension(true,dimension);
-                }
-            }
+    let mut rows = menu.rows.iter().copied();
+    if paged && let Some(row) = rows.next() {
+        if look::hit(mouse, row) { state.map_panel_scroll = start + 1; return true; }
+    }
+    for ((key, at), row) in points.iter().skip(start).take(room).zip(rows.by_ref()) {
+        if look::hit(mouse, row) {
+            state.waypoint_selected = Some(*key);
+            state.camera.snap(*at);
+            state.elapsed = 1.;
+            if state.close_on_hop { state.map_panel = MapPanel::None; }
+            return true;
         }
-    true
-}
-
-fn map_footer(width: f32, height: f32) -> [f32; 4] {
-    [
-        8.0,
-        (height - 47.0).max(0.0),
-        (width - 16.0).max(1.0),
-        39.0_f32.min(height),
-    ]
-}
-fn world_zoom_buttons(width:f32) -> [[f32;4];2] {
-    [[width-152.,36.,19.,18.],[width-130.,36.,19.,18.]]
+    }
+    if paged && let Some(row) = rows.next() {
+        if look::hit(mouse, row) { state.map_panel_scroll = start.saturating_sub(1); return true; }
+    }
+    menu.rows.iter().any(|row| look::hit(mouse, *row))
 }
 
 fn map_zoom(game:&Game<'_>,state:&mut State,step:f64,offset:[f64;2]) {
     let min=if game.map_option("world_unlimited_zoom_in")==Some(1) {0.025}else{0.1};
     let max=if game.map_option("world_unlimited_zoom_out")==Some(1) {512.}else{64.};
-    state.camera.zoom_at_limit(step,offset,min,max);
+    // `zoom_at_limit` doubles per unit; a wheel step multiplies by ZOOM_STEP.
+    state.camera.zoom_at_limit(step*look::ZOOM_STEP.log2(),offset,min,max);
     state.elapsed=1.;
 }
 
 fn over_map_controls(game:&Game<'_>,state:&State,mouse: [f32; 2], width: f32, height: f32) -> bool {
-    inside(mouse, cache_map_button(width))
-        || map_tools(width).into_iter().any(|rect| inside(mouse, rect))
-        || state.map_panel != MapPanel::None && inside(mouse, map_panel_rect(width, height))
-        || inside(mouse, map_footer(width, height))
-        || (0..4).any(|i| inside(mouse, tab(width, i)))
-        || game.map_option("world_zoom_buttons")==Some(1) && world_zoom_buttons(width).into_iter().any(|rect| inside(mouse,rect))
+    world_controls(game, [width, height]).into_iter().any(|(_, cell)| look::hit(mouse, cell))
+        || state.map_panel == MapPanel::Waypoints && {
+            let menu = look::mini_menu([width, height], look::mini_menu_rows(height), runtime::right_to_left());
+            [menu.set, menu.filter].into_iter().chain(menu.toggles).chain(menu.rows).any(|r| look::hit(mouse, r))
+        }
 }
+
+/// The zoom as Xaero writes it: up to three decimals, at least one (`3.0x`, `1.728x`).
+fn zoom_text(zoom: f64) -> String {
+    let text = format!("{zoom:.3}");
+    let text = text.trim_end_matches('0');
+    if text.ends_with('.') { format!("{text}0x") } else { format!("{text}x") }
+}
+
 fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let mouse = game.cursor();
     let rect = rectangle(batch.width, batch.height);
@@ -6490,24 +6314,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         let percent=(since.elapsed().as_millis()*100/180).min(100) as u8;
         set_opacity(batch,first_vertex,percent);
     }
-    let mut coordinates = tr(
-        "Cursor: —",
-        "Курсор: —",
-        "Curseur : —",
-        "Cursor: —",
-        "Mauszeiger: —",
-    )
-    .to_owned();
-    let mut nether = tr(
-        "Nether: —",
-        "Незер: —",
-        "Nether : —",
-        "Nether: —",
-        "Nether: —",
-    )
-    .to_owned();
-    let mut biome = None;
-    let mut lod_warning = false;
+    let mut lines: Vec<(String, u32)> = Vec::new();
     let mut tooltip = None;
     if !over_map_controls(game,state,mouse, batch.width, batch.height)
         && let Some(frame) = state.frame.as_ref().filter(|f| {
@@ -6520,23 +6327,17 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else {
             match frame.view.layer {
                 Layer::Below(maps::FULL_CAVE) => None,
-                Layer::Below(y) => Some(ColumnInfo {
-                    height: y,
-                    fluid: None,
-                }),
+                Layer::Below(y) => Some(ColumnInfo { height: y, fluid: None }),
                 Layer::Surface => None,
             }
         };
-        let coverage = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-            .maps
-            .coverage();
+        let coverage = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).maps.coverage();
         let rough = if coverage.detailed_at(frame.view.dimension, frame.view.layer, block) {
             None
         } else {
             coverage.lod_sample(frame.view.dimension, frame.view.layer, block)
         };
         let detailed = coverage.detailed_biome(frame.view.dimension, frame.view.layer, block);
-        let height_approximate = column.is_none() && rough.is_some();
         let height = column
             .map(|column| column.height)
             .or_else(|| {
@@ -6545,178 +6346,63 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     .flatten()
             })
             .or_else(|| rough.as_ref().map(|p| p.height));
-        let bottom = column.and_then(|column| column.fluid.map(|fluid| fluid.bottom));
-        coordinates = match height {
-            Some(y) => {
-                let bottom = bottom.map_or_else(String::new, |bottom| {
-                    localized_format!(
-                        " (bottom {})",
-                        " (дно {})",
-                        " (fond {})",
-                        " (fondo {})",
-                        " (Grund {})",
-                        bottom
-                    )
-                });
-                format!(
-                    "{}: X {}  Y {}{}{}  Z {}",
-                    frame.view.dimension.label(),
-                    block[0],
-                    if height_approximate { "≈" } else { "" },
-                    y,
-                    bottom,
-                    block[1]
-                )
-            }
-            None => format!(
-                "{}: X {}  Z {}",
-                frame.view.dimension.label(),
-                block[0],
-                block[1]
-            ),
-        };
-        if let Some([x, _, z]) = runtime::portal_coordinates(
-            frame.view.dimension,
-            Dimension::Nether,
-            [f64::from(block[0]), 0.0, f64::from(block[1])],
-        ) {
-            nether = localized_format!(
-                "Nether: X {x}  Z {z}",
-                "Незер: X {x}  Z {z}",
-                "Nether : X {x}  Z {z}",
-                "Nether: X {x}  Z {z}",
-                "Nether: X {x}  Z {z}"
-            );
+        if game.map_option("map_show_coordinates") != Some(0) {
+            lines.push((match height {
+                Some(y) => format!("X: {} Y: {} Z: {}", block[0], y, block[1]),
+                None => format!("X: {} Z: {}", block[0], block[1]),
+            }, look::SCREEN_TEXT));
         }
-        if state.dimension == frame.view.dimension {
-            if let Some(y) = height.or_else(|| game.native_player().map(|p| p.y.floor() as i32)) {
+        if game.map_option("world_hover_biome") != Some(0) {
+            let mut biome = None;
+            if state.dimension == frame.view.dimension
+                && let Some(y) = height.or_else(|| game.native_player().map(|p| p.y.floor() as i32)) {
                 biome = known_biome(game, state.dimension, [block[0], y, block[1]]);
             }
-        }
-        if biome.is_none() {
-            biome = detailed
-                .as_ref()
+            let biome = biome.or_else(|| detailed.as_ref()
                 .or_else(|| rough.as_ref().and_then(|sample| sample.biome.as_ref()))
-                .map(|name| name.to_string());
+                .map(|name| name.to_string()));
+            if let Some(biome) = biome {
+                lines.push((localized_biome(&biome), look::SCREEN_TEXT));
+            }
         }
-        lod_warning = !coverage.detailed_at(frame.view.dimension, frame.view.layer, block)
-            && coverage
-                .lod_at(frame.view.dimension, frame.view.layer, block)
-                .is_some();
+        if !coverage.detailed_at(frame.view.dimension, frame.view.layer, block)
+            && coverage.lod_at(frame.view.dimension, frame.view.layer, block).is_some()
+        {
+            lines.push((ui("approximate"), look::GREY_TEXT));
+        }
         if let Some(waypoint)=waypoint_at_pointer(game,state,&frame.view,rect,mouse) {
-            tooltip=Some(if game.map_option("waypoint_hide_coords")==Some(1) {waypoint.name.clone()}
-                else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)});
+            tooltip=Some(vec![vec![(if game.map_option("waypoint_hide_coords")==Some(1) {waypoint.name.clone()}
+                else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)}, look::TOOLTIP_TEXT)]]);
         }
-    }
-    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
-    game.native_fill(batch, [6.,6.,tab(batch.width,3)[0]+tab(batch.width,3)[2]-4.,28.], 0xec101922);
-    for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
-        let tab = tab(batch.width, i);
-        button(game, batch, tab, "", mouse, true);
-        if dimension == settings.world_dimension {
-            game.native_fill(batch, tab, 0xe032624b);
-        }
-        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 4.0]);
-        game.map_text(
-            batch,
-            &fit_text(game, dimension.label(), tab[2] - 28.),
-            [tab[0] + 24.0, tab[1] + 8.0],
-            0xffffff,
-            true,
-        );
-    }
-    let footer = map_footer(batch.width, batch.height);
-    game.native_fill(batch, footer, 0xdf10151d);
-    if game.map_option("map_show_coordinates")!=Some(0) {
-        let coordinates=fit_text(game,&format!("{coordinates}   {nether}"),footer[2]-12.);
-        game.map_text(batch,&coordinates,[footer[0]+6.,footer[1]+5.],0xffffff,true);
-    }
-    let show_biome=game.map_option("world_hover_biome")!=Some(0);
-    if show_biome {biome_icon(game,batch,biome.as_deref(),[footer[0]+6.,footer[1]+18.]);}
-    let mut label = if show_biome {biome.as_deref().map_or_else(
-        || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
-        localized_biome,
-    )} else {String::new()};
-    if game.map_option("world_zoom_readout")==Some(1) {
-        if !label.is_empty(){label.push_str(" · ");}
-        label.push_str(&format!("{:.2}×",1./state.camera.zoom));
     }
     if game.map_option("world_cave_ceiling")==Some(1)
         && let Some(Layer::Below(y))=state.frame.as_ref().map(|frame|frame.view.layer) {
-        if !label.is_empty() {label.push_str(" · ");}
-        if y == maps::FULL_CAVE {
-            label.push_str(tr("Full caves", "Общий слой пещер", "Toutes les grottes", "Todas las cuevas", "Alle Höhlen"));
-        } else {
-            label.push_str(&format!("Y ≤ {y}"));
-        }
+        lines.push((if y == maps::FULL_CAVE { ui("full_caves") } else { format!("Y ≤ {y}") }, look::GREY_TEXT));
     }
-    if lod_warning {
-        label.push_str(tr(
-            " | LOD — approximate",
-            " | LOD — приблизительно",
-            " | LOD — approximatif",
-            " | LOD — aproximado",
-            " | LOD — ungefähr",
-        ));
+    let widths: Vec<f32> = lines.iter().map(|(text, _)| game.map_text_width(text)).collect();
+    for ((text, color), at) in lines.iter().zip(look::cursor_lines([batch.width, batch.height], &widths)) {
+        game.map_text(batch, text, [at[0], at[1]], *color, true);
     }
-    game.map_text(
-        batch,
-        &label,
-        [footer[0] + 26.0, footer[1] + 21.0],
-        if lod_warning { 0xffffd45c } else { 0xffffff },
-        true,
-    );
-    if let Some(tooltip) = tooltip
-        && state.info.is_none()
-    {
-        draw_tooltip(game, batch, &tooltip, mouse);
-    }
-    if game.map_option("world_zoom_buttons")==Some(1) && state.menu.is_none() && state.info.is_none() {
-        for (rect,label) in world_zoom_buttons(batch.width).into_iter().zip(["−","+"]) {
-            button(game,batch,rect,label,mouse,true);
-        }
+    if game.map_option("world_zoom_readout") != Some(0) {
+        let text = zoom_text(1. / state.camera.zoom);
+        let (zoom_box, at) = look::zoom_label([batch.width, batch.height], game.map_text_width(&text));
+        game.native_fill(batch, zoom_box, look::ZOOM_BOX);
+        draw_text(game, batch, &text, at, look::SCREEN_TEXT, true);
     }
     if state.info.is_none() && state.menu.is_none() {
-        draw_map_tools(game,batch,state,mouse);
+        if let Some(lines) = draw_world_controls(game, batch, state, mouse) { tooltip = Some(lines); }
+        if let Some(lines) = draw_mini_menu(game, batch, state, mouse) { tooltip = Some(lines); }
     }
     draw_menu(game, batch, state);
     draw_notice(game, batch, state);
-    if state.info.is_none() && state.menu.is_none() {
-        let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-        let attention = controller.maps.needs_upgrade(&state.world) || state.caches.attention;
-        button(
-            game,
-            batch,
-            cache_map_button(batch.width),
-            if attention {
-                tr(
-                    "Update cache…",
-                    "Обновить кеш…",
-                    "Actualiser cache…",
-                    "Actualizar caché…",
-                    "Cache aktualisieren…",
-                )
-            } else {
-                tr(
-                    "Map caches…",
-                    "Кеши карт…",
-                    "Caches…",
-                    "Cachés…",
-                    "Karten-Caches…",
-                )
-            },
-            mouse,
-            true,
-        );
+    if let Some(lines) = tooltip && state.info.is_none() && state.menu.is_none() {
+        draw_tooltip_lines(game, batch, &lines, mouse);
     }
     if let Some(info) = state.info {
         draw_information(game, batch, state, info);
     }
 }
 
-fn cache_map_button(width: f32) -> [f32; 4] {
-    [(width - 106.).max(6.), 36., 100., 18.]
-}
 fn cache_rows(height: f32) -> usize {
     (((height - 122.).max(0.) / 48.) as usize).clamp(1, 16)
 }
@@ -7285,19 +6971,6 @@ fn map_covers_world(state: &State) -> bool {
                 .is_some_and(|form| form.background == Mode::Map))
 }
 
-pub(super) fn transparent_waypoints(game: &Game<'_>) -> bool {
-    if !game.map_on(runtime::MOD_ID) || game.mod_screen() != Some(runtime::MOD_ID) {
-        return false;
-    }
-    let state = state();
-    state.mode == Mode::Waypoints
-        || (state.mode == Mode::Name
-            && state
-                .name_form
-                .as_ref()
-                .is_some_and(|form| form.background == Mode::Waypoints))
-}
-
 pub(super) fn covers_world(game: &Game<'_>) -> bool {
     game.map_on(runtime::MOD_ID)
         && game.mod_screen() == Some(runtime::MOD_ID)
@@ -7381,42 +7054,25 @@ fn map_press(
     button: i32,
     canceled: &mut bool,
 ) {
-    if inside(screen.mouse, cache_map_button(screen.rect[2])) {
-        if button == 0 {
-            show_cache_manager(game, state);
-        }
-        *canceled = true;
-        return;
-    }
-    if state.menu.is_none() && button==0 && game.map_option("world_zoom_buttons")==Some(1) {
-        for (rect,step) in world_zoom_buttons(screen.rect[2]).into_iter().zip([-1.,1.]) {
-            if inside(screen.mouse,rect) {
-                map_zoom(game,state,step,[0.,0.]);
-                *canceled=true;
-                return;
+    let size = [screen.rect[2], screen.rect[3]];
+    let mouse = screen.mouse;
+    if state.menu.is_none() {
+        if let Some((control, _)) = world_controls(game, size).into_iter().find(|(_, cell)| look::hit(mouse, *cell)) {
+            if button == 0 {
+                press_world_control(game, state, control);
             }
+            state.dragging = false;
+            *canceled = true;
+            return;
         }
-    }
-    if state.menu.is_none() && map_tools_press(game,state,screen,button) {
-        *canceled = true;
-        return;
-    }
-    if state.menu.is_none() && over_map_controls(game,state,screen.mouse, screen.rect[2], screen.rect[3]) {
-        if button == 0 {
-            for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
-                if inside(screen.mouse, tab(screen.rect[2], i)) {
-                    runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-                        .choose_dimension(true, dimension);
-                    break;
-                }
-            }
+        if button == 0 && mini_menu_press(game, state, mouse, size) {
+            state.dragging = false;
+            *canceled = true;
+            return;
         }
-        state.menu = None;
-        *canceled = true;
-        return;
     }
     if button == 1 {
-        let menu = menu_target_at(game, state, screen, screen.mouse);
+        let menu = menu_target_at(game, state, screen, mouse);
         state.menu = menu;
         *canceled = true;
         return;
@@ -7431,26 +7087,11 @@ fn map_press(
             state.menu = None;
             return;
         };
-        let subtitle = menu_subtitle(game,state,menu,&player);
-        let target = portal_target(state, menu, player.y.floor() as i32);
-        let show_3d = menu
-            .waypoint
-            .map_or(true, |spot| waypoint_show_3d(state, spot));
-        let items = menu_items(game, menu, target, show_3d);
-        let (rect, rows) = menu_layout(
-            game,
-            [screen.rect[2], screen.rect[3]],
-            menu,
-            subtitle.as_deref(),
-            &items,
-        );
-        if inside(screen.mouse, rect) {
-            for ((_, action), row) in items.iter().zip(rows) {
-                if inside(screen.mouse, row) {
-                    perform_menu(game, state, menu, *action);
-                    *canceled = true;
-                    return;
-                }
+        let rows = menu_rows(game, state, menu, &player);
+        let (outer, _, rects) = menu_layout(size, menu, rows.len());
+        if look::hit(mouse, outer) {
+            if let Some(action) = rows.iter().zip(rects).find(|(_, rect)| look::hit(mouse, *rect)).and_then(|(row, _)| row.action) {
+                perform_menu(game, state, menu, action);
             }
             *canceled = true;
             return;
@@ -7466,24 +7107,16 @@ fn map_press(
                 && frame.view.session == state.session
         })
         .and_then(|frame| {
-            hovered_block(&frame.view, rectangle(width, screen.rect[3]), screen.mouse)
+            hovered_block(&frame.view, rectangle(width, screen.rect[3]), mouse)
         })
         .is_some_and(|block| portal_near(state, state.selected, block).is_some());
     if portal_click {
-        let menu = menu_target_at(game, state, screen, screen.mouse);
+        let menu = menu_target_at(game, state, screen, mouse);
         state.menu = menu;
         *canceled = true;
         return;
     }
-    for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
-        if inside(screen.mouse, tab(width, i)) {
-            runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-                .choose_dimension(true, dimension);
-            *canceled = true;
-            return;
-        }
-    }
-    if inside(screen.mouse, rectangle(width, screen.rect[3])) {
+    if inside(mouse, rectangle(width, screen.rect[3])) {
         state.dragging = true;
         *canceled = true;
     }
@@ -7565,46 +7198,60 @@ fn edit_waypoint(state: &mut State, key: u64) {
     let Some(waypoint) = state.waypoints.iter().find(|waypoint| waypoint.key() == key) else {
         return;
     };
-    state.name_form = Some(NameForm {
-        text: waypoint.name.clone(),
-        color: waypoint.color,
-        target: None,
-        rename: Some(Spot {
-            dimension: waypoint.dimension,
-            x: waypoint.x,
-            z: waypoint.z,
-            key,
-        }),
-        group: waypoint.options.group.clone(),
-        group_focused: false,
-        kind: MarkerMode::Saved,
-        group_edit: None,
-        background: state.mode,
-    });
+    let mut form = NameForm::new(state, MarkerMode::Saved, state.mode);
+    form.text = waypoint.name.clone();
+    form.color = waypoint.color;
+    form.rename = Some(Spot { dimension: waypoint.dimension, x: waypoint.x, z: waypoint.z, key });
+    form.group = waypoint.options.group.clone();
+    form.dimension = waypoint.dimension;
+    form.coords = [
+        waypoint.x.to_string(),
+        waypoint.y.to_string(),
+        waypoint.z.to_string(),
+        if waypoint.options.rotation { waypoint.options.yaw.to_string() } else { String::new() },
+    ];
+    form.initials = waypoint.initials.clone().unwrap_or_default();
+    form.show_3d = waypoint.show_3d;
+    form.disabled = waypoint.options.disabled;
+    state.name_form = Some(form);
     state.mode = Mode::Name;
     runtime::set_text_input(true);
 }
 
 fn create_waypoint_here(game: &Game<'_>, state: &mut State) {
     let Some(player) = game.native_player() else { return; };
-    state.name_form = Some(NameForm {
-        text: default_waypoint_name(state),
-        color: default_waypoint_color(state),
-        target: Some(Target {
-            dimension: Dimension::from_id(player.dimension),
-            x: player.x.floor() as i32,
-            y: player.y.floor() as i32,
-            z: player.z.floor() as i32,
-        }),
-        rename: None,
-        group: state.waypoint_group.clone().unwrap_or_default(),
-        group_focused: false,
-        kind: MarkerMode::Saved,
-        group_edit: None,
-        background: state.mode,
+    let form = NameForm::new(state, MarkerMode::Saved, state.mode).at(Target {
+        dimension: Dimension::from_id(player.dimension),
+        x: player.x.floor() as i32,
+        y: player.y.floor() as i32,
+        z: player.z.floor() as i32,
     });
+    state.name_form = Some(form);
     state.mode = Mode::Name;
     runtime::set_text_input(true);
+}
+
+fn teleport_to_waypoint(game: &Game<'_>, state: &mut State, key: u64) {
+    let Some(player) = game.native_player() else { return };
+    let Some(point) = state.waypoints.iter().find(|point| point.key() == key) else { return };
+    let y = if point.options.unspecified_height { player.y.floor() as i32 } else { point.y };
+    state.pending_command = configured_teleport(game, point.dimension, Dimension::from_id(player.dimension),
+        Some(point), [point.x, y, point.z], point.options.unspecified_height);
+    state.close = state.pending_command.is_some();
+}
+
+fn paste_waypoint(game: &Game<'_>, state: &mut State) {
+    let clipboard = game.clipboard.text();
+    let dimension = game.native_player().map_or(Dimension::Overworld, |player| Dimension::from_id(player.dimension));
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    let message = match runtime::receive_shared_waypoint(&clipboard, &state.world, dimension) {
+        Some(point) => match controller.merge_waypoints(&state.world, vec![point]) {
+            Ok(_) => ui("waypoint_imported"),
+            Err(error) => error,
+        },
+        None => ui("no_waypoint_link"),
+    };
+    state.notice = Some((message, Instant::now()));
 }
 
 fn waypoint_press(
@@ -7617,174 +7264,112 @@ fn waypoint_press(
     if button != 0 {
         return;
     }
-    let w=screen.rect[2];
-    let h=screen.rect[3];
-    let [options,create,back]=waypoint_header(w);
-    let controller=runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-    let [group_rect, create_group, rename_group, remove_group]=waypoint_group_buttons(w);
+    *canceled = true;
+    let size = [screen.rect[2], screen.rect[3]];
+    let mouse = screen.mouse;
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    let (list, rows) = waypoint_screen(game, state, size);
+    let rows: Vec<(u64, [f32; 4])> = rows.into_iter().map(|(_, point, row)| (point.key(), row)).collect();
     if state.waypoint_groups_open {
-        state.waypoint_groups_open=false;
-        if inside(screen.mouse,group_rect) { *canceled=true;return; }
-        let groups=waypoint_groups(game,state);
-        let count=visible_group_rows(h);
-        let start=state.waypoint_groups_scroll.min(groups.len().saturating_sub(count));
-        if let Some((_,group))=groups.into_iter().skip(start).take(count).enumerate()
-            .find(|(i,_)|inside(screen.mouse,group_row(w,*i)))
-        {
-            state.waypoint_group=group;
-            state.waypoint_scroll=0;
-            state.waypoint_selected=None;
-            controller.select_waypoint_group(&state.world,state.waypoint_group.as_deref());
-            *canceled=true;
-            return;
+        state.waypoint_groups_open = false;
+        if let Some((row, _)) = set_rows(game, state, list.set, list.actions[0][1]).into_iter().find(|(_, rect)| look::hit(mouse, *rect)) {
+            match row {
+                SetRow::Select(group) => {
+                    state.waypoint_group = group;
+                    state.waypoint_scroll = 0;
+                    state.waypoint_selected = None;
+                    controller.select_waypoint_group(&state.world, state.waypoint_group.as_deref());
+                }
+                SetRow::Rename(name) => {
+                    let mut form = NameForm::new(state, MarkerMode::Saved, Mode::Waypoints);
+                    form.text = name.clone();
+                    form.group_edit = Some(GroupEdit::Rename(name));
+                    state.name_form = Some(form);
+                    state.mode = Mode::Name;
+                    runtime::set_text_input(true);
+                }
+                SetRow::DeleteEmpty(name) => {
+                    if controller.remove_empty_waypoint_group(&state.world, &name) {
+                        state.waypoint_group = None;
+                        state.waypoint_scroll = 0;
+                        state.waypoint_selected = None;
+                    }
+                }
+            }
         }
+        return;
     }
-    let [search,dimension,sort]=waypoint_filters(w);
-    state.waypoint_search_focus=inside(screen.mouse,search);
+    state.waypoint_search_focus = look::hit(mouse, list.filter);
     runtime::set_text_input(state.waypoint_search_focus);
     if state.waypoint_search_focus {
-        *canceled=true;
         return;
     }
-    if inside(screen.mouse,dimension) {
-        let i=Dimension::ALL.iter().position(|d|*d==state.waypoint_dimension).unwrap_or(0);
-        state.waypoint_dimension=Dimension::ALL[(i+1)%Dimension::ALL.len()];
-        state.waypoint_scroll=0;
-        state.waypoint_selected=None;
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,sort) {
-        state.waypoint_sort=(state.waypoint_sort+1)%3;
-        state.waypoint_scroll=0;
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,options) {
-        open_settings(state,Some(Mode::Waypoints),2);
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,create) {
-        create_waypoint_here(game,state);
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,back) {
-        if missing_item(game,state,true).is_none() {state.mode=Mode::Map;}
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,group_rect) {
-        state.waypoint_groups_open=true;
-        state.waypoint_groups_scroll=0;
-        *canceled=true;
-        return;
-    }
-    let named = state.waypoint_group.as_ref().filter(|name|!name.is_empty());
-    let group_edit = if inside(screen.mouse,create_group) {
-        Some(GroupEdit::Create)
-    } else if inside(screen.mouse,rename_group) {
-        named.cloned().map(GroupEdit::Rename)
-    } else {None};
-    if let Some(group_edit) = group_edit {
-        let text = match &group_edit {GroupEdit::Create => String::new(),GroupEdit::Rename(name)=>name.clone()};
-        state.name_form = Some(NameForm {
-            text, color: 0, target: None, rename: None, group: String::new(), group_focused:false,
-            kind: MarkerMode::Saved, group_edit: Some(group_edit), background:Mode::Waypoints,
-        });
-        state.mode = Mode::Name;
-        runtime::set_text_input(true);
-        *canceled=true;
-        return;
-    }
-    if inside(screen.mouse,remove_group) && let Some(name)=named
-        && controller.remove_empty_waypoint_group(&state.world,name)
-    {
-        state.waypoint_group = None;
+    if look::hit(mouse, list.bars[0]) {
+        let i = Dimension::ALL.iter().position(|d| *d == state.waypoint_dimension).unwrap_or(0);
+        state.waypoint_dimension = Dimension::ALL[(i + 1) % Dimension::ALL.len()];
         state.waypoint_scroll = 0;
         state.waypoint_selected = None;
-        *canceled=true;
         return;
     }
-    let hit = visible_waypoint_rows(game,state,screen.rect[2],screen.rect[3]).find_map(|(_,point,row)| {
-        inside(screen.mouse, row).then(|| (row, point.key()))
-    });
-    if let Some((row, key)) = hit {
-        let toggle = waypoint_3d_rect(row);
-        if inside(screen.mouse, toggle) {
-            controller.change_waypoint(&state.world, key, |point| {
-                if point.map_only() {
-                    point.options.visibility %= 2;
-                    point.show_3d = true;
-                } else {
-                    point.show_3d = !point.show_3d;
-                }
-            });
-        } else if inside(screen.mouse, [toggle[0]-24.0, toggle[1], 20.0, 18.0]) {
-            controller.change_waypoint(&state.world, key, |point| point.options.disabled = !point.options.disabled);
+    if look::hit(mouse, list.bars[1]) {
+        state.waypoint_sort = (state.waypoint_sort + 1) % 3;
+        state.waypoint_scroll = 0;
+        return;
+    }
+    if look::hit(mouse, list.options) {
+        open_settings(state, Some(Mode::Waypoints), Some(2));
+        return;
+    }
+    if look::hit(mouse, list.set) {
+        state.waypoint_groups_open = true;
+        state.waypoint_groups_scroll = 0;
+        return;
+    }
+    if look::hit(mouse, list.new_set) {
+        let mut form = NameForm::new(state, MarkerMode::Saved, Mode::Waypoints);
+        form.text = String::new();
+        form.group_edit = Some(GroupEdit::Create);
+        state.name_form = Some(form);
+        state.mode = Mode::Name;
+        runtime::set_text_input(true);
+        return;
+    }
+    if look::hit(mouse, list.done) {
+        state.close = true;
+        return;
+    }
+    if let Some((key, _)) = rows.iter().find(|(_, row)| look::hit(mouse, *row)) {
+        // A second click on the selected row shows it on the map.
+        if state.waypoint_selected == Some(*key) {
+            if let Some(dimension) = show_selected_waypoint(state) {
+                controller.choose_dimension(true, dimension);
+            }
         } else {
-            state.waypoint_selected = Some(key);
+            state.waypoint_selected = Some(*key);
         }
-        *canceled = true;
         return;
     }
-    let [rename, delete, show, share, paste] = waypoint_actions(screen.rect[2], screen.rect[3]);
-    if inside(screen.mouse, share) && let Some(point) = selected_waypoint(state) {
-        state.pending_copy = Some(point.share_link());
-        state.notice = Some((tr(
-            "Waypoint link copied", "Ссылка на метку скопирована", "Lien du repère copié",
-            "Enlace del marcador copiado", "Wegpunktlink kopiert",
-        ).to_owned(), Instant::now()));
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, paste) {
-        let clipboard = game.clipboard.text();
-        let dimension = game.native_player().map_or(Dimension::Overworld, |player| Dimension::from_id(player.dimension));
-        let message = match runtime::receive_shared_waypoint(&clipboard, &state.world, dimension) {
-            Some(point) => match controller.merge_waypoints(&state.world, vec![point]) {
-                Ok(_) => tr("Waypoint imported", "Метка импортирована", "Repère importé", "Marcador importado", "Wegpunkt importiert").to_owned(),
-                Err(error) => error,
-            },
-            None => tr("No waypoint link in clipboard", "В буфере нет ссылки на метку", "Aucun lien de repère dans le presse-papiers", "No hay enlace en el portapapeles", "Kein Wegpunktlink in der Zwischenablage").to_owned(),
-        };
-        state.notice = Some((message, Instant::now()));
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, show) {
-        if let Some(dimension) = show_selected_waypoint(state) {
-            runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-                .choose_dimension(true, dimension);
+    let [edit, teleport, share, enable, delete] = list.actions;
+    let selected = selected_waypoint(state).map(|point| (point.key(), point.share_link()));
+    if look::hit(mouse, edit) {
+        match selected {
+            Some((key, _)) => edit_waypoint(state, key),
+            None => create_waypoint_here(game, state),
         }
-        *canceled = true;
         return;
     }
-    if inside(screen.mouse, rename)
-        && let Some(key) = selected_waypoint(state).map(Waypoint::key)
-    {
-        edit_waypoint(state,key);
-        *canceled = true;
-        return;
-    }
-    if inside(screen.mouse, delete)
-        && let Some(waypoint) = selected_waypoint(state)
-    {
-        controller.delete_waypoint(&state.world, waypoint.key());
-        state.notice = Some((
-            tr(
-                "Waypoint deleted",
-                "Вейпоинт удалён",
-                "Repère supprimé",
-                "Marcador eliminado",
-                "Wegpunkt gelöscht",
-            )
-            .into(),
-            Instant::now(),
-        ));
+    let Some((key, link)) = selected else { return };
+    if look::hit(mouse, teleport) && teleport_allowed(game) {
+        teleport_to_waypoint(game, state, key);
+    } else if look::hit(mouse, share) {
+        state.pending_copy = Some(link);
+        state.notice = Some((ui("link_copied"), Instant::now()));
+    } else if look::hit(mouse, enable) {
+        controller.change_waypoint(&state.world, key, |point| point.options.disabled = !point.options.disabled);
+    } else if look::hit(mouse, delete) {
+        controller.delete_waypoint(&state.world, key);
+        state.notice = Some((ui("waypoint_deleted"), Instant::now()));
         state.waypoint_selected = None;
-        *canceled = true;
     }
 }
 
@@ -7795,58 +7380,63 @@ fn name_press(
     button: i32,
     canceled: &mut bool,
 ) {
-    if button != 0 {
+    if !matches!(button, 0 | 1) {
         return;
     }
-    let rect = name_form_rect(screen.rect[2], screen.rect[3]);
-    if let Some(form) = state.name_form.as_mut() {
-        if form.group_edit.is_none() && inside(screen.mouse, group_field(rect)) {
-            form.group_focused = true;
-            *canceled = true;
-            return;
-        }
-        if inside(screen.mouse, [rect[0] + 10.0, rect[1] + 26.0, rect[2] - 20.0, 18.0]) {
-            form.group_focused = false;
-            *canceled = true;
-            return;
-        }
+    *canceled = true;
+    let layout = look::waypoint_form([screen.rect[2], screen.rect[3]], runtime::right_to_left());
+    let mouse = screen.mouse;
+    let groups = waypoint_groups(game, state);
+    let step = |len: usize, i: usize| if button == 0 { (i + 1) % len } else { (i + len - 1) % len };
+    let Some(valid) = state.name_form.as_ref().map(NameForm::valid) else { return };
+    if button == 0 && look::hit(mouse, layout.confirm) {
+        if valid { save_name(game, state); }
+        return;
     }
-    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
-        if inside(screen.mouse, color_swatch_at(rect, index)) {
-            if let Some(form) = state.name_form.as_mut() {
-                form.color = color;
-            }
-            *canceled = true;
-            return;
-        }
-    }
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    if inside(screen.mouse, save) {
-        save_name(game, state);
-        *canceled = true;
-    } else if inside(screen.mouse, cancel) {
+    if button == 0 && look::hit(mouse, layout.cancel) {
         cancel_name(state);
-        *canceled = true;
+        return;
+    }
+    let Some(form) = state.name_form.as_mut() else { return };
+    if button == 0 {
+        if let Some(field) = FIELDS.into_iter()
+            .filter(|field| form.group_edit.is_none() || *field == Field::Name)
+            .find(|field| look::hit(mouse, form_field(&layout, *field)))
+        {
+            form.focus = field;
+            return;
+        }
+    }
+    if form.group_edit.is_some() {
+        return;
+    }
+    if look::hit(mouse, layout.color) {
+        let colors = runtime::WAYPOINT_COLORS;
+        let i = colors.iter().position(|c| *c == form.color).unwrap_or(colors.len() - 1);
+        form.color = colors[step(colors.len(), i)];
+    } else if look::hit(mouse, layout.dimension) {
+        let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
+        let i = dimensions.iter().position(|d| *d == form.dimension).unwrap_or(0);
+        form.dimension = dimensions[step(3, i)];
+    } else if look::hit(mouse, layout.set) {
+        let names: Vec<String> = groups.into_iter().flatten().chain(std::iter::once(String::new())).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let i = names.iter().position(|g| *g == form.group).unwrap_or(0);
+        form.group = names[step(names.len(), i)].clone();
+    } else if button == 0 && look::hit(mouse, layout.world_3d) {
+        form.show_3d = !form.show_3d;
+    } else if button == 0 && look::hit(mouse, layout.enabled) {
+        form.disabled = !form.disabled;
     }
 }
 
 fn save_name(game: &Game<'_>, state: &mut State) {
-    let Some(form) = state.name_form.take() else {
+    let Some(mut form) = state.name_form.take() else {
         return;
     };
     let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-    if let Some(edit) = form.group_edit {
+    let initials = Some(form.initials.trim().to_uppercase()).filter(|text| !text.is_empty());
+    let yaw = form.yaw();
+    if let Some(edit) = form.group_edit.take() {
         let name = form.text.trim();
         let saved = match edit {
             GroupEdit::Create => controller.add_waypoint_groups(&state.world,[name.to_owned()]),
@@ -7858,12 +7448,9 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             state.waypoint_scroll = 0;
             state.waypoint_selected = None;
         }
-        state.notice = Some((if saved {
-            tr("Group saved","Группа сохранена","Groupe enregistré","Grupo guardado","Gruppe gespeichert")
-        } else {
-            tr("Group unchanged","Группа не изменена","Groupe inchangé","Grupo sin cambios","Gruppe unverändert")
-        }.to_owned(),Instant::now()));
+        state.notice = Some((ui(if saved { "set_saved" } else { "set_unchanged" }), Instant::now()));
     } else if let Some(rename) = form.rename {
+        let at = form.position();
         controller.change_waypoint(&state.world, rename.key, |point| {
             point.name = Waypoint::clean_name(&form.text);
             point.options.group = form.group.trim().to_owned();
@@ -7872,61 +7459,46 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             } else {
                 Waypoint::clean_color(form.color)
             };
+            if let Some([x, y, z]) = at {
+                point.x = x;
+                point.y = y;
+                point.z = z;
+            }
+            point.dimension = form.dimension;
+            point.initials = initials.clone();
+            point.show_3d = form.show_3d;
+            point.options.disabled = form.disabled;
+            point.options.rotation = yaw.is_some();
+            point.options.yaw = yaw.unwrap_or(0);
         });
-        state.notice = Some((
-            tr(
-                "Waypoint updated",
-                "Вейпоинт обновлён",
-                "Repère modifié",
-                "Marcador actualizado",
-                "Wegpunkt aktualisiert",
-            )
-            .into(),
-            Instant::now(),
-        ));
-    } else if let Some(target) = form.target {
-        let biome = known_biome(game, target.dimension, [target.x, target.y, target.z]);
+        state.waypoint_selected = None;
+        state.notice = Some((ui("waypoint_updated"), Instant::now()));
+    } else if let Some([x, y, z]) = form.position() {
+        let biome = known_biome(game, form.dimension, [x, y, z]);
         let saved = controller.add_waypoint(Waypoint {
             world: state.world.clone(),
-            dimension: target.dimension,
-            x: target.x,
-            y: target.y,
-            z: target.z,
+            dimension: form.dimension,
+            x,
+            y,
+            z,
             name: Waypoint::clean_name(&form.text),
-            initials: None,
+            initials,
             options: runtime::WaypointOptions {
                 group: form.group.trim().to_owned(),
                 temporary: !matches!(form.kind, MarkerMode::Saved),
                 destination: matches!(form.kind, MarkerMode::Destination),
                 visibility: if !matches!(form.kind,MarkerMode::Saved) && game.map_option("temporary_waypoints_global")==Some(1) {1} else {0},
+                disabled: form.disabled,
+                rotation: yaw.is_some(),
+                yaw: yaw.unwrap_or(0),
                 ..Default::default()
             },
             color: form.color,
             icon: runtime::WaypointIcon::Letter,
             biome,
-            show_3d: true,
+            show_3d: form.show_3d,
         });
-        state.notice = Some((
-            if saved {
-                tr(
-                    "Waypoint saved",
-                    "Вейпоинт сохранён",
-                    "Repère enregistré",
-                    "Marcador guardado",
-                    "Wegpunkt gespeichert",
-                )
-            } else {
-                tr(
-                    "Waypoint unchanged: duplicate, limit reached or world unavailable",
-                    "Вейпоинт не изменён: дубликат, лимит или мир недоступен",
-                    "Repère inchangé : doublon, limite atteinte ou monde indisponible",
-                    "Marcador sin cambios: duplicado, límite alcanzado o mundo no disponible",
-                    "Wegpunkt unverändert: Duplikat, Grenze erreicht oder Welt nicht verfügbar",
-                )
-            }
-            .into(),
-            Instant::now(),
-        ));
+        state.notice = Some((ui(if saved { "waypoint_saved" } else { "waypoint_unchanged" }), Instant::now()));
     }
     state.mode = form.background;
     runtime::set_text_input(false);
@@ -7967,9 +7539,8 @@ pub(super) fn scroll(
     }
     let mut state = state();
     if state.mode == Mode::Settings {
-        let panel=settings_panel(screen.rect[2],screen.rect[3]);
-        let max=settings_catalog(game,state.settings_tab).count().saturating_sub(settings_rows(panel));
-        state.settings_scroll=(state.settings_scroll as i64-scroll[1] as i64).clamp(0,max as i64) as usize;
+        let max=settings_pages(settings_items(game,&state).len()) - 1;
+        state.settings_scroll=(state.settings_scroll as i64-scroll[1].signum() as i64).clamp(0,max as i64) as usize;
         *canceled=true;
         return;
     }
@@ -7998,7 +7569,9 @@ pub(super) fn scroll(
     }
     if state.mode == Mode::Waypoints {
         if state.waypoint_groups_open {
-            let groups=waypoint_groups(game,&state).len().saturating_sub(visible_group_rows(screen.rect[3]));
+            let list=look::waypoint_list([screen.rect[2],screen.rect[3]],0,runtime::right_to_left());
+            let fit=((list.actions[0][1]-list.set[1]-list.set[3])/list.set[3]).floor().max(1.) as usize;
+            let groups=(waypoint_groups(game,&state).len()+2).saturating_sub(fit);
             state.waypoint_groups_scroll=(state.waypoint_groups_scroll as i64-scroll[1] as i64).clamp(0,groups as i64) as usize;
             *canceled=true;
             return;
@@ -8013,8 +7586,9 @@ pub(super) fn scroll(
         return;
     }
     if state.map_panel == MapPanel::Waypoints
-        && inside(screen.mouse,map_panel_rect(screen.rect[2],screen.rect[3])) {
-        let max = shown_waypoints(&state).count().saturating_sub(map_panel_rows(screen.rect[3]));
+        && look::mini_menu([screen.rect[2], screen.rect[3]], look::mini_menu_rows(screen.rect[3]), runtime::right_to_left())
+            .rows.iter().any(|row| look::hit(screen.mouse, *row)) {
+        let max = mini_waypoints(&state).len().saturating_sub(look::mini_menu_rows(screen.rect[3]).saturating_sub(2));
         state.map_panel_scroll = (state.map_panel_scroll as i64 - scroll[1] as i64).clamp(0,max as i64) as usize;
         *canceled = true;
         return;
@@ -8035,7 +7609,10 @@ pub(super) fn scroll(
     *canceled = true;
 }
 
-pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
+/// GLFW's Control modifier bit.
+const CONTROL: u32 = 0x2;
+
+pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &mut bool) {
     if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
         return;
     }
@@ -8066,6 +7643,11 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
             _=>{}
         }
         *canceled=true;
+        return;
+    }
+    if state.mode == Mode::Waypoints && key == "key.keyboard.v" && modifiers & CONTROL != 0 {
+        paste_waypoint(game, &mut state);
+        *canceled = true;
         return;
     }
     if state.mode == Mode::Waypoints && state.waypoint_groups_open && key=="key.keyboard.escape" {
@@ -8103,18 +7685,43 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
             }
             "key.keyboard.backspace" => {
                 if let Some(form) = state.name_form.as_mut() {
-                    if form.group_focused { form.group.pop(); } else { form.text.pop(); }
+                    let focus = form.focus;
+                    form.field(focus).pop();
+                }
+                *canceled = true;
+            }
+            "key.keyboard.tab" => {
+                if let Some(form) = state.name_form.as_mut() && form.group_edit.is_none() {
+                    let i = FIELDS.iter().position(|field| *field == form.focus).unwrap_or(0);
+                    form.focus = FIELDS[(i + 1) % FIELDS.len()];
                 }
                 *canceled = true;
             }
             "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
-                save_name(game, &mut state);
+                if state.name_form.as_ref().is_some_and(NameForm::valid) {
+                    save_name(game, &mut state);
+                }
                 *canceled = true;
             }
             _ => {
                 *canceled = true;
             }
         }
+        return;
+    }
+    if state.mode == Mode::Map && state.mini_filter_focus {
+        match key {
+            "key.keyboard.escape" | "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+                state.mini_filter_focus = false;
+                runtime::set_text_input(false);
+            }
+            "key.keyboard.backspace" => {
+                state.mini_filter.pop();
+                state.map_panel_scroll = 0;
+            }
+            _ => {}
+        }
+        *canceled = true;
         return;
     }
     if key == "key.keyboard.escape" {
@@ -8134,6 +7741,14 @@ pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
         return;
     }
     let mut state = state();
+    if state.mode == Mode::Map && state.mini_filter_focus {
+        if !c.is_control() && state.mini_filter.len() + c.len_utf8() <= 64 {
+            state.mini_filter.push(c);
+            state.map_panel_scroll = 0;
+        }
+        *canceled = true;
+        return;
+    }
     if state.mode == Mode::Waypoints && state.waypoint_search_focus {
         if !c.is_control() && state.waypoint_search.len()+c.len_utf8()<=128 {
             state.waypoint_search.push(c);
@@ -8150,10 +7765,9 @@ pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
         return;
     }
     if let Some(form) = state.name_form.as_mut() {
-        if form.group_focused {
-            if form.group.len() + c.len_utf8() <= 128 { form.group.push(c); }
-        } else if if form.group_edit.is_some() {form.text.len()+c.len_utf8()<=128} else {form.text.chars().count()<32} {
-            form.text.push(c);
+        let focus = form.focus;
+        if form.accepts(focus, c) {
+            form.field(focus).push(c);
         }
     }
     *canceled = true;
