@@ -12,7 +12,8 @@ macro_rules! localized_format {
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
-            Language::English | Language::Arabic => format!($en $(, $arg)*),
+            Language::English => format!($en $(, $arg)*),
+            Language::Arabic => runtime::arabic::format($en, &format!($en $(, $arg)*)),
         }
     };
 }
@@ -359,7 +360,8 @@ fn build_leaf_palette(game: &Game<'_>) -> LeafPalette {
         palette.states.insert(id.0, LeafColor { rgb, tint });
     }
     if let Some(rgb) = average_texture(&resources, "block/water_still") {
-        palette.water_texture = rgb;
+        let light = |shift: u32| ((((rgb >> shift) & 255) as f32 * maps::WATER_LIGHT).round() as u32).min(255) << shift;
+        palette.water_texture = light(16) | light(8) | light(0);
     }
     palette
 }
@@ -511,6 +513,8 @@ struct State {
     close_on_hop: bool,
     /// The last waypoint the hop control centred on.
     hop: usize,
+    /// Team's players' faces by name (`refresh_team_skins`).
+    team_skins: BTreeMap<String, String>,
     map_settings_change: Option<(String, String)>,
     settings_return: Option<Mode>,
     /// The settings category open, or none for the home page.
@@ -601,6 +605,7 @@ impl Default for State {
             mini_filter_focus: false,
             close_on_hop: true,
             hop: 0,
+            team_skins: BTreeMap::new(),
             map_settings_change: None,
             settings_return: None,
             settings_tab: None,
@@ -2999,6 +3004,9 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let Some(identity) = game.map_client_state() else {
         return;
     };
+    if game.map_on("team") {
+        refresh_team_skins(game);
+    }
     let (copy, command, change) = {
         let mut state = state();
         (state.pending_copy.take(), state.pending_command.take(), state.map_settings_change.take())
@@ -4264,6 +4272,7 @@ fn draw_hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
         frame.view.dimension==state.selected && frame.view.session==state.session) {
         draw_radar(game,batch,&frame.view,map,settings.round,true);
         draw_minimap_waypoints(game,batch,&state,&frame.view,map,settings.round);
+        draw_team(game,batch,&state,&frame.view,map,settings.round);
         if let Some(player) = game.native_player() {
             draw_player(game,batch,&frame.view,map,state.marker,&player,settings.rotate_with_player);
         }
@@ -4725,6 +4734,118 @@ pub(super) fn tick_radar(game: &Game<'_>) {
             tracked: is_tracked,
         }
     });
+}
+
+/// Team's players' skins by name, from the game's player list: the faces Map draws for
+/// teammates whose body is out of sight. Refreshed from the list every second.
+fn refresh_team_skins(game: &mut Game<'_>) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let Some((players, _, _)) = game.remote_tab_players() else { return };
+    let skins: BTreeMap<String, String> = players
+        .into_iter()
+        .map(|player| {
+            let skin = game.face_skin(player.uuid, &player.skin);
+            (player.name, skin)
+        })
+        .collect();
+    state().team_skins = skins;
+}
+
+/// A teammate's face: their skin with its hat on a frame of their Team colour, so a teammate
+/// reads apart from other players; the default skin's face until the game knows theirs.
+fn draw_mate(game: &Game<'_>, batch: &mut HudBatch, mate: &::map::team_view::Mate, skin: Option<&str>, at: [f32; 2]) {
+    let face = look::head_rect(at, [8., 8.], 1.);
+    let frame = look::head_rect(at, [10., 10.], 1.);
+    game.native_fill(batch, frame, 0xff00_0000 | (mate.colour & 0x00ff_ffff));
+    let layers = [[8., 8., 8., 8.], [40., 8., 8., 8.]];
+    let drawn = skin.is_some_and(|skin| layers.iter().all(|src| game.native_sprite(batch, skin, *src, face, None)));
+    if !drawn {
+        for src in layers {
+            game.native_sprite(batch, "entity/player/wide/steve", src, face, None);
+        }
+    }
+}
+
+/// A ping's pennant in its owner's colour: a sword for danger, the block for loot, else the
+/// owner's initial.
+fn draw_ping(game: &Game<'_>, batch: &mut HudBatch, ping: &::map::team_view::Ping, at: [f32; 2], scale: f32) {
+    let (body, [left, right, tip]) = look::pennant(at, scale);
+    let o = look::PENNANT_SHADOW_OFFSET * scale;
+    let shift = |p: [f32; 2]| [p[0] + o, p[1] + o];
+    game.native_fill(batch, [body[0] + o, body[1] + o, body[2], body[3]], look::PENNANT_SHADOW);
+    game.native_quad(batch, [shift(left), shift(right), shift(tip), shift(left)], look::PENNANT_SHADOW);
+    let fill = 0xff00_0000 | (ping.colour & 0x00ff_ffff);
+    game.native_fill(batch, body, fill);
+    game.native_quad(batch, [left, right, tip, left], fill);
+    let centre = [body[0] + body[2] * 0.5, body[1] + body[3] * 0.5];
+    use ::map::team_view::Mark;
+    if ping.mark == Mark::Danger {
+        let rows = look::DANGER_GLYPH;
+        let cell = [body[0], body[1], body[2], body[3]];
+        draw_glyph(game, batch, rows, cell, look::GLYPH);
+        return;
+    }
+    if ping.mark == Mark::Loot
+        && let Some(block) = ping.block.as_deref()
+    {
+        let side = body[2] - 4. * scale;
+        let stack = horizon_client::items::ItemStack::new(block, 1);
+        if game.native_item_stack(batch, &stack, [centre[0] - side * 0.5, centre[1] - side * 0.5], side) {
+            return;
+        }
+    }
+    let letter = first_letter(&ping.owner).to_string();
+    let width = game.map_text_width(&letter) * scale;
+    let origin = [(centre[0] - width * 0.5).round(), (centre[1] - 4. * scale).round()];
+    let first = batch.vertices.len();
+    game.map_text(batch, &letter, origin, look::INITIAL_TEXT, true);
+    batch.scale_since(first, origin[0], origin[1], scale, scale);
+}
+
+/// Team on a map: each teammate's face (on the minimap clamped onto the frame when out of
+/// range, as waypoints are) and each live ping's pennant. A teammate the radar already shows
+/// is not drawn twice.
+fn draw_team(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View, rect: [f32; 4], round: bool) {
+    if !game.map_on("team") {
+        return;
+    }
+    let dimension = view.dimension.id();
+    let shown_by_radar: Vec<String> = ::map::radar::snapshot()
+        .filter(|radar| radar.dimension == dimension && (!view.large || radar.world_map))
+        .map(|radar| radar.dots.iter().filter_map(|dot| game.remote_player_name(dot.entity_id).map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let place = |at: [f64; 3]| {
+        let point = world_screen(view, rect, [at[0], at[2]]);
+        if view.large {
+            look::on_map(rect, false, point).then_some(point)
+        } else {
+            let square = look::waypoint_square(rect, round, point);
+            Some([square[0] + square[2] * 0.5, square[1] + square[3] * 0.5])
+        }
+    };
+    for ping in ::map::team_view::pings().iter().filter(|ping| Dimension::from_id(&ping.dimension) == view.dimension) {
+        if let Some(at) = place(ping.at) {
+            let scale = if view.large { 1. } else { 0.6 };
+            // A pennant's tip marks the spot; on the minimap the clamped square's centre does.
+            draw_ping(game, batch, ping, at, scale);
+        }
+    }
+    for mate in ::map::team_view::mates().iter().filter(|mate| Dimension::from_id(&mate.dimension) == view.dimension) {
+        let point = world_screen(view, rect, [mate.at[0], mate.at[2]]);
+        if shown_by_radar.iter().any(|name| *name == mate.name) && look::on_map(rect, round, point) {
+            continue;
+        }
+        if let Some(at) = place(mate.at) {
+            draw_mate(game, batch, mate, state.team_skins.get(&mate.name).map(String::as_str), at);
+        }
+    }
 }
 
 /// What kind of thing a radar dot is, for the draw order.
@@ -5214,6 +5335,9 @@ fn draw(
                 game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32,
             );
         }
+        if large {
+            draw_team(game, batch, state, &frame.view, rect, false);
+        }
         if large && let Some(player) = game.native_player() {
             draw_player(game, batch, &frame.view, rect, state.marker, &player, false);
         }
@@ -5534,34 +5658,31 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
     }
     wrapped
 }
+/// The information panel's Close button, at its reading end.
+fn information_close(rect: [f32; 4]) -> [f32; 4] {
+    let button = [rect[0] + rect[2] - 82.0, rect[1] + rect[3] - 24.0, 72.0, 18.0];
+    if runtime::right_to_left() { [rect[0] + 10.0, button[1], button[2], button[3]] } else { button }
+}
+
 fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: Menu) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x98000000);
+    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], look::SCREEN_DIM);
     let rect = information_rect(batch.width, batch.height);
-    game.native_fill(batch, rect, 0xff151d27);
-    game.map_text(
-        batch,
-        tr(
-            "Chunk / region",
-            "Чанк / регион",
-            "Chunk / région",
-            "Chunk / región",
-            "Chunk / Region",
-        ),
-        [rect[0] + 10.0, rect[1] + 8.0],
-        0xffffff,
-        true,
+    game.native_fill(batch, rect, look::MENU_BORDER);
+    game.native_fill(batch, [rect[0] + 1., rect[1] + 1., rect[2] - 2., rect[3] - 2.], look::MENU_ROW);
+    let title = tr(
+        "Chunk / region",
+        "Чанк / регион",
+        "Chunk / région",
+        "Chunk / región",
+        "Chunk / Region",
     );
+    let width = game.map_text_width(title);
+    game.map_text(batch, title, [(rect[0] + (rect[2] - width) * 0.5).round(), rect[1] + 8.0], look::SCREEN_TEXT, true);
     let lines = information_lines(game, state, menu, rect[2] - 24.0);
     let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
     let start = state.info_scroll.min(lines.len().saturating_sub(visible));
     for (i, (text, color)) in lines.iter().skip(start).take(visible).enumerate() {
-        game.map_text(
-            batch,
-            text,
-            [rect[0] + 10.0, rect[1] + 25.0 + i as f32 * 12.0],
-            *color,
-            true,
-        );
+        text_in(game, batch, text, rect, 10., rect[1] + 25.0 + i as f32 * 12.0, 0xff00_0000 | *color);
     }
     if lines.len() > visible {
         let area = rect[3] - 56.0;
@@ -5569,17 +5690,13 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
         let y = rect[1]
             + 25.0
             + (area - thumb) * start as f32 / lines.len().saturating_sub(visible).max(1) as f32;
-        game.native_fill(batch, [rect[0] + rect[2] - 7.0, y, 3.0, thumb], 0xffa2b2bf);
+        let bar = if runtime::right_to_left() { rect[0] + 4.0 } else { rect[0] + rect[2] - 7.0 };
+        game.native_fill(batch, [bar, y, 3.0, thumb], 0xffa2b2bf);
     }
     button(
         game,
         batch,
-        [
-            rect[0] + rect[2] - 82.0,
-            rect[1] + rect[3] - 24.0,
-            72.0,
-            18.0,
-        ],
+        information_close(rect),
         tr("Close", "Закрыть", "Fermer", "Cerrar", "Schließen"),
         game.cursor(),
         true,
@@ -6089,7 +6206,7 @@ fn control_tooltip(game: &Game<'_>, state: &State, control: look::Control) -> Ve
         look::Control::Help => {
             let mut lines = vec![line(ui("help_drag")), line(ui("help_wheel")), line(ui("help_right_click"))];
             for (id, default, label) in [
-                ("create_waypoint", "key.keyboard.b", "help_new_waypoint"),
+                ("create_waypoint", "key.keyboard.r", "help_new_waypoint"),
                 (runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT, "help_waypoints"),
                 (runtime::WORLD_MAP_KEY, runtime::WORLD_MAP_DEFAULT, "help_close_map"),
             ] {
@@ -6462,7 +6579,18 @@ fn cache_row(width: f32, index: usize) -> [f32; 4] {
 }
 fn cache_footer(width: f32, height: f32, index: usize) -> [f32; 4] {
     let w = ((width - 32.) / 3.).max(1.);
-    [12. + index as f32 * (w + 4.), height - 55., w, 18.]
+    let rect = [12. + index as f32 * (w + 4.), height - 55., w, 18.];
+    if runtime::right_to_left() { look::mirror(rect, width) } else { rect }
+}
+fn cache_refresh(width: f32) -> [f32; 4] {
+    let rect = [width - 92., 10., 80., 18.];
+    if runtime::right_to_left() { look::mirror(rect, width) } else { rect }
+}
+/// Text at `inset` from the reading start of `row`: its left edge, or its right edge right to
+/// left.
+fn text_in(game: &Game<'_>, batch: &mut HudBatch, text: &str, row: [f32; 4], inset: f32, y: f32, color: u32) {
+    let x = if runtime::right_to_left() { row[0] + row[2] - inset - game.map_text_width(text) } else { row[0] + inset };
+    draw_text(game, batch, text, [x, y], color, false);
 }
 fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
     use runtime::container::Compatibility::*;
@@ -6693,8 +6821,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
         .caches
         .snapshot();
-    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xf0181b20);
-    game.map_text(
+    draw_backdrop(game, batch, state);
+    screen_title(
+        game,
         batch,
         tr(
             "Map caches",
@@ -6703,14 +6832,12 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Cachés de mapas",
             "Karten-Caches",
         ),
-        [12., 14.],
-        0xffffff,
-        true,
+        14.,
     );
     button(
         game,
         batch,
-        [batch.width - 92., 10., 80., 18.],
+        cache_refresh(batch.width),
         tr(
             "Refresh",
             "Обновить",
@@ -6735,17 +6862,15 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         .enumerate()
     {
         let row = cache_row(batch.width, i);
-        game.native_fill(
-            batch,
-            row,
-            if state.caches.selected.as_ref() == Some(&entry.file) {
-                0xff334658
-            } else {
-                0xff232c35
-            },
-        );
+        if state.caches.selected.as_ref() == Some(&entry.file) {
+            game.native_fill(batch, row, look::SELECTED_BORDER);
+            game.native_fill(batch, [row[0] + 1., row[1] + 1., row[2] - 2., row[3] - 2.], look::SELECTED_ROW);
+        } else {
+            game.native_fill(batch, row, look::LIST_BAND);
+        }
+        let icon_x = if runtime::right_to_left() { row[0] + row[2] - 38. } else { row[0] + 6. };
         if let Some(icon) = state.caches.icons.get(&entry.file) {
-            let x = f64::from(row[0] + 6.);
+            let x = f64::from(icon_x);
             let y = f64::from(row[1] + 6.);
             super::minimap_pages::paint(
                 batch,
@@ -6758,7 +6883,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 ],
             );
         } else {
-            game.native_fill(batch, [row[0] + 6., row[1] + 6., 32., 32.], 0xff506846);
+            game.native_fill(batch, [icon_x, row[1] + 6., 32., 32.], 0xff506846);
             game.map_text(
                 batch,
                 if entry
@@ -6770,7 +6895,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 } else {
                     "W"
                 },
-                [row[0] + 18., row[1] + 18.],
+                [icon_x + 12., row[1] + 18.],
                 0xffffff,
                 true,
             );
@@ -6783,29 +6908,14 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             else { tr("World", "Мир", "Monde", "Mundo", "Welt") }
         } else { &entry.name };
         let title = cache_text(game, label, row[2] - 52.);
-        game.map_text(batch, &title, [row[0] + 44., row[1] + 4.], 0xffffff, false);
+        text_in(game, batch, &title, row, 44., row[1] + 4., look::SCREEN_TEXT);
         let size = entry.bytes as f64 / 1048576.;
         let description = if hidden { format!("{size:.2} MiB") } else { format!("{size:.2} MiB · {}", entry.file) };
         let detail = cache_text(game, &description, row[2] - 52.);
-        game.map_text(
-            batch,
-            &detail,
-            [row[0] + 44., row[1] + 17.],
-            0xbac4d0,
-            false,
-        );
+        text_in(game, batch, &detail, row, 44., row[1] + 17., look::GREY_TEXT);
         let label = cache_text(game, cache_status(&entry.compatibility), row[2] - 52.);
-        game.map_text(
-            batch,
-            &label,
-            [row[0] + 44., row[1] + 30.],
-            if entry.compatibility == runtime::container::Compatibility::Current {
-                0x9fc792
-            } else {
-                0xffd24a
-            },
-            false,
-        );
+        text_in(game, batch, &label, row, 44., row[1] + 30.,
+            if entry.compatibility == runtime::container::Compatibility::Current { 0xff9f_c792 } else { 0xffff_d24a });
     }
     if snapshot.entries.is_empty() {
         game.map_text(
@@ -6817,7 +6927,8 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "No hay cachés",
                 "Keine Karten-Caches",
             ),
-            [12., 46.],
+            [if runtime::right_to_left() { batch.width - 12. - game.map_text_width(tr(
+                "No map cache files", "Файлов кеша карт нет", "Aucun cache", "No hay cachés", "Keine Karten-Caches")) } else { 12. }, 46.],
             0xbac4d0,
             false,
         );
@@ -6837,7 +6948,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             ),
             batch.width - 24.,
         );
-        game.map_text(batch, &identity, [12., batch.height - 73.], 0xbac4d0, false);
+        text_in(game, batch, &identity, [0., 0., batch.width, batch.height], 12., batch.height - 73., look::GREY_TEXT);
     }
     let can_rebuild = selected.is_some_and(|e| {
         e.world.is_some()
@@ -6924,9 +7035,10 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             )
         });
     let message = cache_text(game, message, batch.width - 24.);
-    game.map_text(batch, &message, [12., batch.height - 29.], 0xffd24a, false);
+    let screen = [0., 0., batch.width, batch.height];
+    text_in(game, batch, &message, screen, 12., batch.height - 29., 0xffff_d24a);
     if snapshot.truncated {
-        game.map_text(batch, "4096+", [12., batch.height - 15.], 0xffd24a, false);
+        text_in(game, batch, "4096+", screen, 12., batch.height - 15., 0xffff_d24a);
     }
 }
 fn cache_press(
@@ -6953,7 +7065,7 @@ fn cache_press(
     if snapshot.loading || state.caches.operation.is_some() {
         return;
     }
-    if inside(screen.mouse, [screen.rect[2] - 92., 10., 80., 18.]) {
+    if inside(screen.mouse, cache_refresh(screen.rect[2])) {
         state.caches.confirm = None;
         refresh_cache_catalog(game);
         return;
@@ -7076,12 +7188,7 @@ pub(super) fn press(
     if state.info.is_some() {
         if button == 0 {
             let rect = information_rect(screen.rect[2], screen.rect[3]);
-            let close = [
-                rect[0] + rect[2] - 82.0,
-                rect[1] + rect[3] - 24.0,
-                72.0,
-                18.0,
-            ];
+            let close = information_close(rect);
             if !inside(screen.mouse, rect) || inside(screen.mouse, close) {
                 state.info = None;
             }

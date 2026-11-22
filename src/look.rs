@@ -306,6 +306,19 @@ pub fn glyph(control: Control) -> &'static [&'static str] {
     }
 }
 
+/// A danger ping's sword, drawn on its pennant.
+pub const DANGER_GLYPH: &[&str] = &[
+    ".......##",
+    "......###",
+    ".....###.",
+    "#...###..",
+    ".#.###...",
+    "..###....",
+    "..##.....",
+    ".#..#....",
+    "#........",
+];
+
 /// The mini-menu toggles' glyphs.
 pub fn mini_glyph(toggle: MiniToggle) -> &'static [&'static str] {
     match toggle {
@@ -1091,6 +1104,9 @@ mod tests {
             assert!(rows.iter().all(|r| r.len() == width), "{control:?}");
             assert!(!glyph_runs(rows, [0.0, 0.0]).is_empty());
         }
+        assert!(DANGER_GLYPH.iter().all(|r| r.len() == DANGER_GLYPH[0].len()));
+        let [w, h] = glyph_size(DANGER_GLYPH);
+        assert!(w + 1.0 <= PENNANT[0] && h + 1.0 <= PENNANT[1], "the sword fits its pennant with its shadow");
         for toggle in MINI_TOGGLES {
             let rows = mini_glyph(toggle);
             assert!(rows.iter().all(|r| r.len() == rows[0].len()));

@@ -2,6 +2,7 @@
 use mod_api::{self, Hooks, KeyRegistration, Registrar, RegistrationContext, SettingSpec};
 pub mod look;
 pub mod radar;
+pub mod team_view;
 pub mod map_claims;
 pub mod runtime;
 pub mod xaero_cache;
@@ -291,7 +292,7 @@ impl Hooks for Mod {
             (runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT),
             ("quick_minimap", "key.keyboard.z"),
             ("slime_map", "key.keyboard.unknown"),
-            ("create_waypoint", "key.keyboard.b"),
+            ("create_waypoint", "key.keyboard.r"),
             ("map_settings", "key.keyboard.y"),
         ] {
             r.register_key_mapping(
