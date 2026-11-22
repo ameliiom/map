@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -145,6 +145,7 @@ pub enum Language {
     French,
     Spanish,
     German,
+    Arabic,
 }
 
 impl Language {
@@ -158,6 +159,8 @@ impl Language {
             Self::Spanish
         } else if prefix.eq_ignore_ascii_case("de") {
             Self::German
+        } else if prefix.eq_ignore_ascii_case("ar") {
+            Self::Arabic
         } else {
             Self::English
         }
@@ -170,12 +173,25 @@ pub fn set_language(code: &str) {
     LANGUAGE.store(Language::from_code(code) as u8, Ordering::Relaxed);
 }
 
+static RIGHT_TO_LEFT: AtomicBool = AtomicBool::new(false);
+
+/// Set from the game's own language data: whether the selected language reads right to left.
+pub fn set_right_to_left(value: bool) {
+    RIGHT_TO_LEFT.store(value, Ordering::Relaxed);
+}
+
+/// Whether the interface mirrors: the selected language reads right to left.
+pub fn right_to_left() -> bool {
+    RIGHT_TO_LEFT.load(Ordering::Relaxed)
+}
+
 pub fn language() -> Language {
     match LANGUAGE.load(Ordering::Relaxed) {
         1 => Language::Russian,
         2 => Language::French,
         3 => Language::Spanish,
         4 => Language::German,
+        5 => Language::Arabic,
         _ => Language::English,
     }
 }
@@ -193,7 +209,18 @@ pub fn tr(
         Language::French => french,
         Language::Spanish => spanish,
         Language::German => german,
+        Language::Arabic => arabic::text(english).unwrap_or(english),
     }
+}
+
+/// Arabic for the interface strings written inline with `tr`; the lang files carry the rest.
+mod arabic {
+    pub fn text(english: &str) -> Option<&'static str> {
+        TABLE.iter().find(|(en, _)| *en == english).map(|(_, ar)| *ar)
+    }
+    const TABLE: &[(&str, &str)] = &[
+        ("N", "N"),
+    ];
 }
 
 macro_rules! localized_format {
@@ -203,7 +230,7 @@ macro_rules! localized_format {
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
-            Language::English => format!($en $(, $arg)*),
+            Language::English | Language::Arabic => format!($en $(, $arg)*),
         }
     };
 }
@@ -542,10 +569,10 @@ pub mod minimap {
                 waypoint_letters: WaypointLetters::default(),
                 cache_ram_mib: 64,
                 enabled: true,
-                corner: Corner::TopRight,
+                corner: Corner::TopLeft,
                 size_px: 128,
                 blocks_per_pixel: 1.0,
-                rotate_with_player: false,
+                rotate_with_player: true,
                 round: false,
                 mini_dimension: super::Dimension::Player,
                 world_dimension: super::Dimension::Player,
@@ -555,7 +582,7 @@ pub mod minimap {
                 death_waypoint_auto_remove: true,
                 world_waypoints: true,
                 world_waypoint_style: WorldMarkerStyle::default(),
-                directions: false,
+                directions: true,
                 direction_style: DirectionStyle::default(),
                 labels_on_hover: true,
                 footsteps: false,
@@ -706,7 +733,7 @@ pub mod minimap {
             if matches!(button, 6 | 18 | 19) || button >= super::SDK_SETTING_SLOTS {
                 return Vec::new();
             }
-            let initial = Self::default();
+            let initial = Self::ordering();
             let mut value = initial;
             let mut choices = Vec::new();
             loop {
@@ -720,11 +747,22 @@ pub mod minimap {
             }
         }
 
+        /// The values the settings page lists first: the order its saved indices and the
+        /// lang files' `mwwr.value.*` labels were written against, kept when defaults change.
+        fn ordering() -> Self {
+            Self {
+                corner: Corner::TopRight,
+                rotate_with_player: false,
+                directions: false,
+                ..Self::default()
+            }
+        }
+
         pub fn option_index(self, button: usize) -> Option<usize> {
             if button >= 32 {
                 return None;
             }
-            let mut selected = Self::default();
+            let mut selected = Self::ordering();
             selected.overlay(self, 1 << button);
             Self::options(button).iter().position(|v| *v == selected)
         }

@@ -11,7 +11,7 @@ macro_rules! localized_format {
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
-            Language::English => format!($en $(, $arg)*),
+            Language::English | Language::Arabic => format!($en $(, $arg)*),
         }
     };
 }
@@ -5215,11 +5215,11 @@ pub(super) fn tick_radar(game: &Game<'_>) {
     }
     let setting = |key: &str| game.map_number(key).or_else(|| game.map_option(key).map(f64::from))
         .unwrap_or_else(|| match key {
-            "radar_smooth" | "radar_hide_invisible" | "radar_players" | "radar_mobs" | "radar_items" | "radar_other" | "radar_name_scale" => 1.,
+            "radar" | "radar_icons" | "radar_world_map" | "radar_smooth" | "radar_hide_invisible" | "radar_players" | "radar_mobs" | "radar_items" | "radar_other" | "radar_name_scale" => 1.,
             "radar_range" => 64.,
-            "radar_height" => 32.,
+            "radar_height" => 20.,
             "radar_dot_size" => 2.,
-            "radar_icon_size" => 9.,
+            "radar_icon_size" => 8.,
             _ => 0.,
         });
     if !radar::sample_due(setting("radar")>0.) {return;}

@@ -27,6 +27,10 @@ pub struct Dot {
     pub order: u16,
     pub over_frame: bool,
     pub fallback_name: Option<String>,
+    /// Blocks above (positive) or below the player.
+    pub dy: f32,
+    /// Whether the face darkens with depth below the player.
+    pub depth_shade: bool,
 }
 
 pub struct View {
@@ -409,6 +413,7 @@ pub fn load_rules(directory: &Path, create_example: bool) -> io::Result<(usize, 
 }
 
 pub fn register(registrar: &mut dyn Registrar) {
+    // Heads for every kind on both maps by default; names off.
     for key in ["radar", "radar_names", "radar_world_map", "radar_icons"]
         .into_iter()
         .chain(GROUPS)
@@ -417,7 +422,7 @@ pub fn register(registrar: &mut dyn Registrar) {
             .register_setting(SettingSpec::toggle(
                 key,
                 format!("mwwr.setting.{key}"),
-                GROUPS.contains(&key),
+                key != "radar_names",
             ))
             .expect("valid radar setting");
     }
@@ -448,10 +453,10 @@ pub fn register(registrar: &mut dyn Registrar) {
         ))
         .expect("valid radar range");
     for (key, min, max, step, default) in [
-        ("radar_height", 4., 128., 4., 32.),
+        ("radar_height", 4., 128., 4., 20.),
         ("radar_dot_size", 1., 10., 1., 2.),
         ("radar_name_scale", 1., 3., 0.5, 1.),
-        ("radar_icon_size", 4., 24., 1., 9.),
+        ("radar_icon_size", 4., 24., 1., 8.),
     ] {
         registrar
             .register_setting(SettingSpec::range(
@@ -683,11 +688,6 @@ fn gather<'a>(
             .map_or(1., |start| {
                 (1. - (dist - start).max(0.) / (radius - start)).clamp(0.15, 1.)
             });
-        let vertical_alpha = if rule.height_fade.unwrap_or(true) && vertical > 4. {
-            143.
-        } else {
-            255.
-        };
         let dot = Dot {
             entity_id: entity.id(),
             kind: id,
@@ -697,10 +697,12 @@ fn gather<'a>(
             icon,
             size: rule.size.unwrap_or(size),
             icon_scale: rule.icon_scale.unwrap_or(1.),
-            alpha: (vertical_alpha * fade).round() as u8,
+            alpha: (255. * fade).round() as u8,
             order: rule.order.unwrap_or(0),
             over_frame: mode(rule.over_frame, false, listed),
             fallback_name: name_if_needed.filter(|_| !show_name),
+            dy: (at[1] - y) as f32,
+            depth_shade: rule.height_fade.unwrap_or(true),
         };
         dots.push((
             !rule.priority,

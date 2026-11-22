@@ -131,7 +131,7 @@ macro_rules! define_tests {
                 let saved = read_settings(&directory.join(SETTINGS_FILE)).unwrap();
                 assert!(saved.round);
                 assert_eq!(saved.blocks_per_pixel, 2.0);
-                assert_eq!(saved.corner, minimap::Corner::BottomLeft);
+                assert_eq!(saved.corner, minimap::Corner::TopRight);
                 assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
                 let reopened = Controller::open(directory.clone());
                 reopened.shutdown();
@@ -459,17 +459,17 @@ macro_rules! define_tests {
             #[test]
             fn direction_settings_roundtrip_toggle_and_reset() {
                 let mut settings = Settings::default();
-                assert!(!settings.directions);
+                assert!(settings.directions);
                 assert_eq!(settings.direction_style, minimap::DirectionStyle::Compass);
                 assert_eq!(minimap::apply(&mut settings, 15), 1 << 15);
-                assert!(settings.directions);
+                assert!(!settings.directions);
                 assert_eq!(minimap::apply(&mut settings, 16), 1 << 16);
                 assert_eq!(settings.direction_style, minimap::DirectionStyle::Axes);
                 assert_eq!(Settings::decode(&settings.encode()), settings);
                 let mask = minimap::apply(&mut settings, 6);
                 assert_eq!(mask & (1 << 15), 1 << 15);
                 assert_eq!(mask & (1 << 16), 1 << 16);
-                assert!(!settings.directions);
+                assert!(settings.directions);
                 assert_eq!(settings.direction_style, minimap::DirectionStyle::Compass);
                 assert!(
                     Settings::decode("directions=true\ndirection_style=axes")
