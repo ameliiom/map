@@ -407,5 +407,6 @@
   "map.ui.color_4": "بنفسجي",
   "map.ui.color_5": "برتقالي",
   "map.ui.color_6": "سماوي",
-  "map.ui.color_7": "أبيض"
+  "map.ui.color_7": "أبيض",
+  "mwwr.setting.world_far_terrain": "التضاريس البعيدة من LOD اللعبة"
 }

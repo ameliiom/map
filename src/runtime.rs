@@ -4698,10 +4698,14 @@ pub mod maps {
         }
     }
 
-    /// A shallow seabed keeps most of its colour; deep water darkens it in
+    /// The brightness of flat ground in daylight, measured against Xaero's map (a grass
+    /// platform reads #4C7B3C there: the tinted texture mean times this).
+    pub const LIT_FLAT: f32 = 1.08;
+
+    /// A shallow seabed keeps some of its colour; deep water darkens it in
     /// steps instead of looking one block deep everywhere.
     fn water_alpha(depth: u32) -> u8 {
-        (70 + depth.saturating_mul(10)).min(190) as u8
+        (150 + depth.saturating_mul(12)).min(215) as u8
     }
     pub fn lod_water_color(
         base: Option<u32>,
@@ -7218,44 +7222,9 @@ pub mod maps {
             let mut prepared_tiles = 0;
             for (key, image) in nodes {
                 let slot = locations[&VisualKey::Lod(key)];
-                let mut parents = Vec::new();
-                let mut dependencies = Vec::new();
-                if image
-                    .as_ref()
-                    .is_some_and(|i| i.coverage.iter().any(|v| *v != u16::MAX))
-                    && view.layer == Layer::Surface
-                {
-                    for level in key.level + 1..=22 {
-                        let shift = level - key.level;
-                        let parent = LodKey {
-                            x: key.x.div_euclid(1 << shift),
-                            z: key.z.div_euclid(1 << shift),
-                            level,
-                        };
-                        let mut legacy = lod_record(view.dimension, parent);
-                        legacy[2] = 0;
-                        let tile = self
-                            .overviews
-                            .tiles
-                            .get(&lod_record(view.dimension, parent))
-                            .or_else(|| self.overviews.tiles.get(&legacy))
-                            .or_else(|| {
-                                self.overviews.tiles.get(&overview_key(
-                                    view.dimension,
-                                    view.layer,
-                                    parent,
-                                ))
-                            })
-                            .map(|(_, t)| t.clone());
-                        if let Some(tile) = tile {
-                            dependencies.push((
-                                parent,
-                                VisualSource::Image(Arc::downgrade(&tile), Vec::new()),
-                            ));
-                            parents.push((parent, tile));
-                        }
-                    }
-                }
+                // Only explored ground shows: a coarse cell is drawn when most of it was seen,
+                // never filled in from a coarser estimate (Xaero leaves the rest black).
+                let dependencies: Vec<(LodKey, VisualSource)> = Vec::new();
                 let appearance = view.terrain_style.appearance;
                 let variant_sources = if key.level == 0 && appearance != Appearance::default() {
                     [(key.x, key.z), (key.x, key.z.saturating_sub(1)), (key.x.saturating_sub(1), key.z)]
@@ -7294,24 +7263,10 @@ pub mod maps {
                     prepared_tiles += 1;
                     if let Some(image) = image {
                         let mut image = (*image).clone();
-                        let bounds = key.bounds();
-                        let stride = bounds[2] / 16;
-                        for (parent, tile) in &parents {
+                        if key.level > 0 {
                             for i in 0..256 {
-                                if image.coverage[i] == u16::MAX {
-                                    continue;
-                                }
-                                let at = [
-                                    (bounds[0] + (i % 16) as i64 * stride + stride / 2) as i32,
-                                    (bounds[1] + (i / 16) as i64 * stride + stride / 2) as i32,
-                                ];
-                                if let Some(cell) = parent.cell(at) {
-                                    image.fill_partial(
-                                        i,
-                                        &tile.pixels[cell * 4..cell * 4 + 4],
-                                        tile.coverage[cell],
-                                    );
-                                }
+                                let seen = image.coverage[i] >= u16::MAX / 2 && image.pixels[i * 4 + 3] >= 128;
+                                image.pixels[i * 4 + 3] = if seen { 255 } else { 0 };
                             }
                         }
                         if key.level == 0
@@ -7893,8 +7848,8 @@ pub mod maps {
                         match style.slopes {
                             0=>1.,
                             1=>(1.+f32::from(n.saturating_sub(height).signum() as i8)*-0.14).clamp(0.7,1.3),
-                            3=>(1.06+relief*1.35).clamp(0.55,1.50),
-                            _=>(1.09+relief).clamp(0.65,1.38),
+                            3=>(LIT_FLAT+relief*1.35).clamp(0.55,1.50),
+                            _=>(LIT_FLAT+relief).clamp(0.65,1.38),
                         }
                     };
                     for channel in 0..3 {
@@ -8268,7 +8223,7 @@ pub mod maps {
                     let shade = if current.walls[local] {
                         0.55
                     } else {
-                        (1.09 + relief).clamp(0.65, 1.38)
+                        (LIT_FLAT + relief).clamp(0.65, 1.38)
                     };
                     for channel in 0..3 {
                         pixels[i + channel] = (f32::from(color[channel]) * shade).round() as u8;

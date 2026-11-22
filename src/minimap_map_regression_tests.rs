@@ -284,10 +284,10 @@ macro_rules! define_tests {
                 let frame = cache.render(request, 1);
                 // Block (8, 0) is three blocks below (8, -1), in the neighbouring tile.
                 let shaded = (16 * 16 + 8) * 4;
-                assert_eq!(&frame.pixels[shaded..shaded + 3], &[167, 167, 167]);
+                assert_eq!(&frame.pixels[shaded..shaded + 3], &[165, 165, 165]);
                 // Inside the north chunk, equal heights keep the base brightness.
                 let plain = (15 * 16 + 8) * 4;
-                assert_eq!(&frame.pixels[plain..plain + 3], &[218, 218, 218]);
+                assert_eq!(&frame.pixels[plain..plain + 3], &[216, 216, 216]);
             }
             #[test]
             fn unknown_terrain_is_transparent_instead_of_a_screen_checkerboard() {

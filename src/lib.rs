@@ -192,6 +192,7 @@ impl Hooks for Mod {
             ("locator_world",false),
             ("minimap_hide_screens",false),
             ("world_map_distances",false),
+            ("world_far_terrain",false),
 
         ] {
             r.register_setting(SettingSpec::toggle(key, format!("mwwr.setting.{key}"), default))
@@ -250,8 +251,8 @@ impl Hooks for Mod {
             ("locator_mini_scale",0.0,17.0,1.0,0.0),
             ("locator_world_scale",0.0,17.0,1.0,0.0),
             ("locator_name_scale",0.0,17.0,1.0,0.0),
-            ("world_map_km_at",-1.0,30000000.0,1.0,-1.0),
-            ("world_map_dist_precision",0.0,10.0,1.0,0.0),
+            ("world_map_km_at",-1.0,30000000.0,1.0,10000.0),
+            ("world_map_dist_precision",0.0,10.0,1.0,1.0),
 
             ("minimap_terrain_slopes",0.0,3.0,1.0,2.0),
             ("world_terrain_slopes",0.0,3.0,1.0,2.0),
@@ -260,7 +261,7 @@ impl Hooks for Mod {
             ("minimap_cave_timer",0.0,10000.0,100.0,0.0),
             ("world_cave_timer",0.0,10000.0,100.0,0.0),
             ("world_auto_cave",-1.0,3.0,1.0,-1.0),
-            ("minimap_undiscovered",0.0,100.0,1.0,0.0),
+            ("minimap_undiscovered",0.0,100.0,1.0,50.0),
 
             ("world_waypoint_symbol_scale", 0.5, 5.0, 0.1, 1.0),
             ("world_waypoint_zoom_min", 0.0, 3.0, 0.1, 0.0),
@@ -277,8 +278,8 @@ impl Hooks for Mod {
             ("waypoint_distance_mode", 0.0, 3.0, 1.0, 3.0),
             ("waypoint_vertical_angle", 1.0, 180.0, 1.0, 180.0),
             ("waypoint_horizontal_angle", 1.0, 180.0, 1.0, 10.0),
-            ("waypoint_km_at", -1.0, 30000000.0, 1.0, -1.0),
-            ("waypoint_dist_precision", 0.0, 10.0, 1.0, 0.0),
+            ("waypoint_km_at", -1.0, 30000000.0, 1.0, 10000.0),
+            ("waypoint_dist_precision", 0.0, 10.0, 1.0, 1.0),
             ("world_unlimited_zoom_in", 0.0, 1.0, 1.0, 0.0),
             ("world_unlimited_zoom_out", 0.0, 1.0, 1.0, 0.0),
         ] {

@@ -407,5 +407,6 @@
   "map.ui.color_4": "Purple",
   "map.ui.color_5": "Orange",
   "map.ui.color_6": "Aqua",
-  "map.ui.color_7": "White"
+  "map.ui.color_7": "White",
+  "mwwr.setting.world_far_terrain": "Far terrain from the game's LOD"
 }
