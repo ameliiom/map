@@ -213,29 +213,91 @@ pub fn tr(
     }
 }
 
-/// Arabic for the interface strings written inline with `tr`; the lang files carry the rest.
-mod arabic {
+/// Arabic for the interface strings written inline with `tr` and `localized_format!`, keyed by
+/// their English; the lang files carry the keyed text.
+pub mod arabic {
     pub fn text(english: &str) -> Option<&'static str> {
         TABLE.iter().find(|(en, _)| *en == english).map(|(_, ar)| *ar)
     }
+
+    /// The Arabic of a formatted line: `english` is `template` filled in; its values go into the
+    /// Arabic template's `{}` in the same order. Without an Arabic template, the English.
+    pub fn format(template: &str, english: &str) -> String {
+        let Some(arabic) = text(template) else { return english.to_owned() };
+        let Some(values) = values(template, english) else { return english.to_owned() };
+        let mut out = String::new();
+        let mut values = values.into_iter();
+        let mut rest = arabic;
+        while let Some(at) = rest.find("{}") {
+            out.push_str(&rest[..at]);
+            out.push_str(values.next().unwrap_or(""));
+            rest = &rest[at + 2..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The text that filled each placeholder (`{}`, `{name}`) of `template` in `filled`.
+    fn values<'a>(template: &str, filled: &'a str) -> Option<Vec<&'a str>> {
+        let mut literals = Vec::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            let close = rest[open..].find('}')? + open;
+            literals.push(&rest[..open]);
+            rest = &rest[close + 1..];
+        }
+        let tail = rest;
+        let mut text = filled.strip_prefix(*literals.first().unwrap_or(&""))?;
+        let mut values = Vec::new();
+        for literal in literals.iter().skip(1) {
+            let at = if literal.is_empty() { 0 } else { text.find(literal)? };
+            values.push(&text[..at]);
+            text = &text[at + literal.len()..];
+        }
+        if literals.is_empty() {
+            return Some(values);
+        }
+        values.push(text.strip_suffix(tail)?);
+        Some(values)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn formats_carry_their_values_into_arabic() {
+        assert_eq!(format("Map cache: {}", "Map cache: busy"), "ذاكرة الخريطة: busy");
+        assert_eq!(format("Chunk: {} / {}", "Chunk: -3 / 7"), "القطعة: -3 / 7");
+        assert_eq!(
+            format("Cached detailed chunks: {d}; LOD footprints: {l}", "Cached detailed chunks: 12; LOD footprints: 0"),
+            "القطع المفصّلة المحفوظة: 12؛ آثار LOD: 0"
+        );
+        assert_eq!(format("not in the table {}", "not in the table x"), "not in the table x");
+        assert!(super::arabic::TABLE.iter().all(|(en, ar)| en.matches('{').count() == ar.matches('{').count()));
+    }
     const TABLE: &[(&str, &str)] = &[
-        ("Player", "اللاعب"),
-        ("Overworld", "العالم العلوي"),
-        ("Nether", "النذر"),
-        ("End", "النهاية"),
-        ("On", "تشغيل"),
-        ("Off", "إيقاف"),
-        ("No data", "لا توجد بيانات"),
-        ("Preparing map…", "جارٍ تجهيز الخريطة…"),
-        ("Exporting explored terrain…", "جارٍ تصدير المناطق المستكشفة…"),
-        ("Coordinates copied", "تم نسخ الإحداثيات"),
-        ("Destination coordinates copied", "تم نسخ إحداثيات الوجهة"),
-        ("Waypoint deleted", "تم حذف النقطة"),
         ("Nether portal", "بوابة النذر"),
         ("End portal", "بوابة النهاية"),
         ("End gateway", "ممر النهاية"),
-        ("Chunk / region", "القطعة / المنطقة"),
-        ("Close", "إغلاق"),
+        ("Overworld: spawn point", "العالم العلوي: نقطة الظهور"),
+        ("End: outer islands", "النهاية: الجزر الخارجية"),
+        ("unknown destination", "وجهة غير معروفة"),
+        ("Waypoint {}", "نقطة {}"),
+        ("Radar rules {} · skipped {} · radar-rules.txt", "قواعد الرادار {} · تم تخطي {} · radar-rules.txt"),
+        ("Coordinates copied", "تم نسخ الإحداثيات"),
+        ("Destination coordinates copied", "تم نسخ إحداثيات الوجهة"),
+        ("Waypoint deleted", "تم حذف النقطة"),
+        ("Saved to exports/{}", "تم الحفظ في exports/{}"),
+        ("Export was interrupted", "توقف التصدير"),
+        ("Imported waypoints: {}", "النقاط المستوردة: {}"),
+        ("Import was interrupted", "توقف الاستيراد"),
+        ("Imported chunks: {}", "القطع المستوردة: {}"),
+        ("Map cache: {}", "ذاكرة الخريطة: {}"),
+        ("World border", "حدود العالم"),
+        ("Chunk render: {} chunks", "عرض القطع: {} قطعة"),
+        ("Actual render (LOD): {} chunks", "العرض الفعلي (LOD): {} قطعة"),
+        ("Settings imported {} · skipped {}", "الإعدادات المستوردة {} · تم تخطي {}"),
+        ("Slime chunks require a known seed", "قطع السلايم تحتاج بذرة معروفة"),
+        ("Waypoint imported", "تم استيراد النقطة"),
+        ("Map needs {} in the hotbar", "الخريطة تحتاج {} في شريط الأدوات"),
         ("Claim", "مطالبة"),
         ("yours", "لك"),
         ("claimed", "مطالَب بها"),
@@ -244,14 +306,112 @@ mod arabic {
         ("Rain", "مطر"),
         ("Light", "الضوء"),
         ("Light overlay", "طبقة الضوء"),
-        ("Auto", "تلقائي"),
+        ("N", "N"),
+        ("NE", "NE"),
+        ("E", "E"),
+        ("SE", "SE"),
+        ("S", "S"),
+        ("SW", "SW"),
+        ("W", "W"),
+        ("NW", "NW"),
+        ("No data", "لا توجد بيانات"),
+        ("Preparing map…", "جارٍ تجهيز الخريطة…"),
+        ("Detailed client chunk (cached)", "قطعة مفصّلة من اللعبة (محفوظة)"),
+        ("LOD — approximate data", "LOD — بيانات تقريبية"),
+        ("No data for this layer", "لا توجد بيانات لهذه الطبقة"),
         ("Surface", "السطح"),
-        ("At player height", "على ارتفاع اللاعب"),
-        ("Selected height", "الارتفاع المحدد"),
+        ("Full caves", "كل الكهوف"),
+        ("Below Y {y}", "تحت Y {}"),
+        ("Water", "ماء"),
+        ("Lava", "حمم"),
+        ("{}: surface Y {y}, bottom Y {}", "{}: السطح Y {}، القاع Y {}"),
+        ("Chunk: {} / {}", "القطعة: {} / {}"),
+        ("LOD quality: level {level} (1 sample per {stride}×{stride} blocks)", "جودة LOD: المستوى {} (عينة لكل {}×{} كتلة)"),
+        ("Biome: —", "المنطقة الحيوية: —"),
+        ("Region: {} / {} (32×32 chunks)", "المنطقة: {} / {} (32×32 قطعة)"),
+        ("Region", "المنطقة"),
+        ("mixed coverage: detailed + LOD", "تغطية مختلطة: مفصّلة + LOD"),
+        ("LOD coverage — approximate", "تغطية LOD — تقريبية"),
+        ("Surface LOD cannot describe this underground layer", "LOD السطح لا يصف هذه الطبقة تحت الأرض"),
+        ("Cached detailed chunks: {d}; LOD footprints: {l}", "القطع المفصّلة المحفوظة: {}؛ آثار LOD: {}"),
+        ("Visit history is not recorded yet", "سجل الزيارات غير مسجّل بعد"),
+        ("Chunk / region", "القطعة / المنطقة"),
+        ("Close", "إغلاق"),
+        ("Exporting explored terrain…", "جارٍ تصدير المناطق المستكشفة…"),
+        ("Compatible", "متوافقة"),
+        ("Update available: rebuild map images", "يتوفر تحديث: أعد بناء صور الخريطة"),
+        ("Old format: conversion is not available yet", "صيغة قديمة: التحويل غير متاح بعد"),
+        ("Requires a newer mod version", "تحتاج إصدارًا أحدث من المود"),
+        ("Header unreadable; file preserved", "الترويسة غير مقروءة؛ حُفظ الملف"),
+        ("Rebuild scheduled; images update when this cache is viewed", "جُدولت إعادة البناء؛ تتحدث الصور عند عرض هذه الذاكرة"),
+        ("Cache worker stopped", "توقف عامل الذاكرة"),
+        ("Map caches", "ذاكرة الخرائط"),
+        ("Refresh", "تحديث"),
+        ("Server", "الخادم"),
+        ("World", "العالم"),
+        ("No map cache files", "لا توجد ملفات ذاكرة خرائط"),
+        ("Confirm rebuild", "تأكيد إعادة البناء"),
+        ("Rebuild images", "إعادة بناء الصور"),
+        ("Compress: later", "الضغط: لاحقًا"),
+        ("Back to map", "العودة إلى الخريطة"),
+        ("Working…", "جارٍ العمل…"),
+        ("Only images are rebuilt; saved terrain is retained", "تُعاد الصور فقط؛ تبقى التضاريس المحفوظة"),
+        ("Select a cache. Compression and file conversion are not available yet", "اختر ذاكرة. الضغط وتحويل الملفات غير متاحين بعد"),
+        ("Player", "اللاعب"),
+        ("Overworld", "العالم العلوي"),
+        ("Nether", "النذر"),
+        ("End", "النهاية"),
         ("Top left", "أعلى اليمين"),
         ("Top right", "أعلى اليسار"),
         ("Bottom left", "أسفل اليمين"),
         ("Bottom right", "أسفل اليسار"),
+        ("Letter + distance", "الحرف + المسافة"),
+        ("Letter only", "الحرف فقط"),
+        ("Name + distance", "الاسم + المسافة"),
+        ("Compass", "البوصلة"),
+        ("Axes", "المحاور"),
+        ("One letter", "حرف واحد"),
+        ("Two for similar colours", "حرفان للألوان المتشابهة"),
+        ("Two regardless of colour", "حرفان دائمًا"),
+        ("Auto", "تلقائي"),
+        ("At player height", "على ارتفاع اللاعب"),
+        ("Selected height", "الارتفاع المحدد"),
+        ("On", "تشغيل"),
+        ("Off", "إيقاف"),
+        ("Minimap: {}", "الخريطة المصغرة: {}"),
+        ("Position: {}", "الموضع: {}"),
+        ("Size: {} GUI px", "الحجم: {} بكسل واجهة"),
+        ("Shape: {}", "الشكل: {}"),
+        ("Circle", "دائرة"),
+        ("Square", "مربع"),
+        ("Scale: {} blocks/pixel", "المقياس: {} كتلة/بكسل"),
+        ("Rotation: {}", "الدوران: {}"),
+        ("Reset map settings", "إعادة ضبط إعدادات الخريطة"),
+        ("Minimap dimension: {}", "بُعد الخريطة المصغرة: {}"),
+        ("World map dimension: {}", "بُعد خريطة العالم: {}"),
+        ("Overworld coordinates: {}", "الإحداثيات: {}"),
+        ("Nether coordinates: {}", "إحداثيات البعد الآخر: {}"),
+        ("Death waypoints: {}", "نقاط الموت: {}"),
+        ("Remove death waypoints when reached: {}", "حذف نقاط الموت عند الوصول: {}"),
+        ("Show waypoints in the 3D world: {}", "إظهار النقاط في العالم: {}"),
+        ("3D marker: {}", "العلامة في العالم: {}"),
+        ("Direction letters: {}", "أحرف الاتجاهات: {}"),
+        ("Direction style: {}", "نمط الاتجاهات: {}"),
+        ("3D labels only on hover: {}", "التسميات في العالم عند التأشير فقط: {}"),
+        ("Waypoint", "نقطة"),
+        ("Unsupported Xaero waypoint format at line {}", "صيغة نقاط Xaero غير مدعومة في السطر {}"),
+        ("Import exceeds the waypoint limit", "الاستيراد يتجاوز حد النقاط"),
+        ("Map RAM: {} MiB…", "ذاكرة الخريطة: {} MiB…"),
+        ("Cache manager… (in world)", "إدارة الذاكرة… (داخل العالم)"),
+        ("Waypoint initials: {}", "الأحرف الأولى للنقاط: {}"),
+        ("Map cache unavailable: see map status", "ذاكرة الخريطة غير متاحة: راجع حالة الخريطة"),
+        ("Failed to save settings: see the client log", "تعذّر حفظ الإعدادات: راجع سجل اللعبة"),
+        ("Unknown world", "عالم غير معروف"),
+        ("Waypoint storage is unavailable", "تخزين النقاط غير متاح"),
+        ("Multiple waypoints at {} / {}", "عدة نقاط عند {} / {}"),
+        ("Death", "موت"),
+        ("Imported chunks", "القطع المستوردة"),
+        ("Skipped files", "الملفات المتخطاة"),
     ];
 }
 
@@ -262,7 +422,8 @@ macro_rules! localized_format {
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
-            Language::English | Language::Arabic => format!($en $(, $arg)*),
+            Language::English => format!($en $(, $arg)*),
+            Language::Arabic => $crate::runtime::arabic::format($en, &format!($en $(, $arg)*)),
         }
     };
 }
@@ -4701,11 +4862,14 @@ pub mod maps {
     /// The brightness of flat ground in daylight, measured against Xaero's map (a grass
     /// platform reads #4C7B3C there: the tinted texture mean times this).
     pub const LIT_FLAT: f32 = 1.08;
+    /// Water's own brightness over its tinted texture, measured the same way (a river reads
+    /// #304A82 to #364F81 there).
+    pub const WATER_LIGHT: f32 = 1.23;
 
     /// A shallow seabed keeps some of its colour; deep water darkens it in
     /// steps instead of looking one block deep everywhere.
     fn water_alpha(depth: u32) -> u8 {
-        (150 + depth.saturating_mul(12)).min(215) as u8
+        (177 + depth.saturating_mul(8)).min(225) as u8
     }
     pub fn lod_water_color(
         base: Option<u32>,
