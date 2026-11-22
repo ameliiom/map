@@ -577,6 +577,64 @@ pub fn head_rect(at: Point, texels: [f32; 2], scale: f32) -> Rect {
     [at[0] - w * 0.5, at[1] - h * 0.5, w, h]
 }
 
+/// How far a head may move from its entity to clear a crowd: half a head, so it still
+/// touches its spot.
+pub const CROWD_REACH: f32 = 4.0;
+
+/// Heads that overlap pushed apart so each stays readable, every one at most `reach` from its
+/// anchor. `sizes` are the heads' sides. The same input gives the same result every frame.
+pub fn declutter(anchors: &[Point], sizes: &[f32], reach: f32) -> Vec<Point> {
+    let mut at = anchors.to_vec();
+    for _ in 0..16 {
+        let mut moved = false;
+        for i in 0..at.len() {
+            for j in i + 1..at.len() {
+                let need = (sizes[i] + sizes[j]) * 0.5;
+                let (dx, dy) = (at[j][0] - at[i][0], at[j][1] - at[i][1]);
+                let (ox, oy) = (need - dx.abs(), need - dy.abs());
+                if ox <= 0.0 || oy <= 0.0 {
+                    continue;
+                }
+                // Push along the axis that needs the least, both heads half each; heads on one
+                // spot part along a direction their order picks.
+                let (sx, sy) = if dx == 0.0 && dy == 0.0 {
+                    let a = (i * 7 + j * 13) as f32;
+                    (a.cos(), a.sin())
+                } else {
+                    (dx.signum(), dy.signum())
+                };
+                if ox < oy {
+                    at[i][0] -= sx * ox * 0.5;
+                    at[j][0] += sx * ox * 0.5;
+                } else {
+                    at[i][1] -= sy * oy * 0.5;
+                    at[j][1] += sy * oy * 0.5;
+                }
+                moved = true;
+            }
+        }
+        for (p, a) in at.iter_mut().zip(anchors) {
+            let (dx, dy) = (p[0] - a[0], p[1] - a[1]);
+            let d = dx.hypot(dy);
+            if d > reach {
+                *p = [a[0] + dx / d * reach, a[1] + dy / d * reach];
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    at
+}
+
+/// The area two squares of these sides at these centres share.
+pub fn shared_area(a: Point, sa: f32, b: Point, sb: f32) -> f32 {
+    let need = (sa + sb) * 0.5;
+    let ox = (need - (a[0] - b[0]).abs()).clamp(0.0, sa.min(sb));
+    let oy = (need - (a[1] - b[1]).abs()).clamp(0.0, sa.min(sb));
+    ox * oy
+}
+
 /// The four offsets of a silhouette outline `px` wide.
 pub fn outline_offsets(px: f32) -> [Point; 4] {
     [[-px, 0.0], [px, 0.0], [0.0, -px], [0.0, px]]
@@ -1059,6 +1117,40 @@ mod tests {
         assert_eq!(left[0], right[0]);
         assert!((right[1] - left[1] - 12.0).abs() < 1e-3);
         assert!((tip[0] - left[0] - 8.1).abs() < 1e-3);
+    }
+
+    fn crowd_overlap(at: &[Point], sizes: &[f32]) -> f32 {
+        let mut total = 0.0;
+        for i in 0..at.len() {
+            for j in i + 1..at.len() {
+                total += shared_area(at[i], sizes[i], at[j], sizes[j]);
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn crowds_part_but_stay_anchored() {
+        // Mobs 1 to 2 GUI apart (6 blocks at Xaero's zoom 1), many on one spot, and a lone one.
+        let mut anchors = vec![[100.0, 100.0]; 4];
+        for i in 0..20 {
+            anchors.push([100.0 + (i % 5) as f32 * 1.5, 100.0 + (i / 5) as f32 * 2.0]);
+        }
+        anchors.push([160.0, 160.0]);
+        let sizes = vec![8.0; anchors.len()];
+        let parted = declutter(&anchors, &sizes, CROWD_REACH);
+        let before = crowd_overlap(&anchors, &sizes);
+        let after = crowd_overlap(&parted, &sizes);
+        eprintln!("crowd overlap {before:.1} -> {after:.1} GUI px²");
+        assert!(after < before * 0.5, "overlap {before} -> {after}");
+        for (p, a) in parted.iter().zip(&anchors) {
+            assert!((p[0] - a[0]).hypot(p[1] - a[1]) <= CROWD_REACH + 1e-3);
+        }
+        assert_eq!(parted.last(), anchors.last(), "a lone head does not move");
+        assert_eq!(declutter(&anchors, &sizes, CROWD_REACH), parted, "the same every frame");
+        // Two heads that touch only a little part fully.
+        let two = declutter(&[[0.0, 0.0], [6.0, 0.0]], &[8.0, 8.0], CROWD_REACH);
+        assert!(crowd_overlap(&two, &[8.0, 8.0]) < 1e-3);
     }
 
     #[test]
