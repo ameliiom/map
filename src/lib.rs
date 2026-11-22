@@ -290,7 +290,7 @@ impl Hooks for Mod {
         for (id, default) in [
             (runtime::WORLD_MAP_KEY, runtime::WORLD_MAP_DEFAULT),
             (runtime::WAYPOINTS_KEY, runtime::WAYPOINTS_DEFAULT),
-            ("quick_minimap", "key.keyboard.z"),
+            ("quick_minimap", "key.keyboard.h"),
             ("slime_map", "key.keyboard.unknown"),
             ("create_waypoint", "key.keyboard.r"),
             ("map_settings", "key.keyboard.y"),
