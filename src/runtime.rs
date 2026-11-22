@@ -107,7 +107,7 @@ pub mod profiling {
     }
 }
 
-const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
+const SIZES: [u16; 8] = [64, 96, 128, 135, 160, 192, 224, 256];
 
 /// Stable SDK keys and the historical preference field each key controls.
 pub const SDK_SETTING_ROWS: [(&str, usize); 21] = [
@@ -219,7 +219,39 @@ mod arabic {
         TABLE.iter().find(|(en, _)| *en == english).map(|(_, ar)| *ar)
     }
     const TABLE: &[(&str, &str)] = &[
-        ("N", "N"),
+        ("Player", "اللاعب"),
+        ("Overworld", "العالم العلوي"),
+        ("Nether", "النذر"),
+        ("End", "النهاية"),
+        ("On", "تشغيل"),
+        ("Off", "إيقاف"),
+        ("No data", "لا توجد بيانات"),
+        ("Preparing map…", "جارٍ تجهيز الخريطة…"),
+        ("Exporting explored terrain…", "جارٍ تصدير المناطق المستكشفة…"),
+        ("Coordinates copied", "تم نسخ الإحداثيات"),
+        ("Destination coordinates copied", "تم نسخ إحداثيات الوجهة"),
+        ("Waypoint deleted", "تم حذف النقطة"),
+        ("Nether portal", "بوابة النذر"),
+        ("End portal", "بوابة النهاية"),
+        ("End gateway", "ممر النهاية"),
+        ("Chunk / region", "القطعة / المنطقة"),
+        ("Close", "إغلاق"),
+        ("Claim", "مطالبة"),
+        ("yours", "لك"),
+        ("claimed", "مطالَب بها"),
+        ("Chunk", "القطعة"),
+        ("Thunder", "رعد"),
+        ("Rain", "مطر"),
+        ("Light", "الضوء"),
+        ("Light overlay", "طبقة الضوء"),
+        ("Auto", "تلقائي"),
+        ("Surface", "السطح"),
+        ("At player height", "على ارتفاع اللاعب"),
+        ("Selected height", "الارتفاع المحدد"),
+        ("Top left", "أعلى اليمين"),
+        ("Top right", "أعلى اليسار"),
+        ("Bottom left", "أسفل اليمين"),
+        ("Bottom right", "أسفل اليسار"),
     ];
 }
 
@@ -570,14 +602,14 @@ pub mod minimap {
                 cache_ram_mib: 64,
                 enabled: true,
                 corner: Corner::TopLeft,
-                size_px: 128,
-                blocks_per_pixel: 1.0,
+                size_px: 135,
+                blocks_per_pixel: 2.0,
                 rotate_with_player: true,
                 round: false,
                 mini_dimension: super::Dimension::Player,
                 world_dimension: super::Dimension::Player,
                 overworld_coordinates: true,
-                nether_coordinates: true,
+                nether_coordinates: false,
                 death_waypoints: true,
                 death_waypoint_auto_remove: true,
                 world_waypoints: true,
@@ -752,8 +784,11 @@ pub mod minimap {
         fn ordering() -> Self {
             Self {
                 corner: Corner::TopRight,
+                size_px: 128,
+                blocks_per_pixel: 1.0,
                 rotate_with_player: false,
                 directions: false,
+                nether_coordinates: true,
                 ..Self::default()
             }
         }

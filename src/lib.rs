@@ -161,8 +161,8 @@ impl Hooks for Mod {
             ("waypoints_new_bottom",true),
 
             ("world_hover_biome",true),
-            ("world_zoom_readout",false),
-            ("world_zoom_buttons",false),
+            ("world_zoom_readout",true),
+            ("world_zoom_buttons",true),
             ("world_marker_arrow",true),
             ("world_waypoint_backgrounds",true),
             ("world_waypoint_distance_scale",false),
@@ -212,8 +212,8 @@ impl Hooks for Mod {
             0,
         )).expect("valid light source");
         for (key, color) in [
-            ("minimap_marker_color",0xff5050),
-            ("world_marker_color",0xff5050),
+            ("minimap_marker_color",0xcc1919),
+            ("world_marker_color",0xcc1919),
             ("minimap_grid_color",0x525f70),
             ("minimap_compass_color",0x000000),
             ("minimap_compass_north",0x000000),
@@ -228,7 +228,7 @@ impl Hooks for Mod {
         }
         for (key, min, max, step, default) in [
             ("waypoint_world_opacity", 0., 100., 1., 100.),
-            ("waypoint_map_opacity", 10., 100., 1., 100.),
+            ("waypoint_map_opacity", 10., 100., 1., 90.),
             ("waypoint_world_scale", 0., 17., 1., 0.),
             ("waypoint_map_scale", 0., 17., 1., 0.),
             ("waypoint_min_distance", 0., 4096., 1., 0.),
@@ -456,10 +456,6 @@ impl Hooks for Mod {
         let _ = host;
         let _ = event;
         Flow::Continue
-    }
-    fn menu_background(&self, host: &dyn ClientHost, event: &mut MenuBackgroundEvent<'_>) {
-        let _ = host;
-        let _ = event;
     }
     fn client_disconnecting(&self, host: &dyn ClientHost, event: &mut ClientDisconnectingEvent) {
         let _ = host;

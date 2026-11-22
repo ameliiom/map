@@ -67,16 +67,17 @@ macro_rules! define_tests {
                 let mut edited = settings;
                 let mask = minimap::apply(&mut edited, 9);
                 minimap::merge(&mut settings, edited, mask);
-                assert!(!settings.overworld_coordinates && settings.nether_coordinates);
+                assert!(!settings.overworld_coordinates && !settings.nether_coordinates);
+                assert!(coordinate_lines(settings, Dimension::Overworld, [0.0; 3]).is_empty());
                 minimap::apply(&mut settings, 10);
                 assert_eq!(Settings::decode(&settings.encode()), settings);
-                assert!(coordinate_lines(settings, Dimension::Overworld, [0.0; 3]).is_empty());
+                assert_eq!(coordinate_lines(settings, Dimension::Overworld, [0.0; 3]).len(), 1);
                 let mask = minimap::apply(&mut edited, 6);
                 minimap::merge(&mut settings, edited, mask);
-                assert!(settings.overworld_coordinates && settings.nether_coordinates);
+                assert!(settings.overworld_coordinates && !settings.nether_coordinates);
                 assert_eq!(
                     coordinate_lines(settings, Dimension::Nether, [0.0; 3]).len(),
-                    2
+                    1
                 );
             }
             #[test]
