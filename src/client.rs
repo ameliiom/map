@@ -4946,7 +4946,8 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
         .collect();
     dots.sort_by_key(|(kind, _)| *kind);
     let scale = radar.icon_size / 8.;
-    let mut labels = Vec::new();
+    // Where each head goes: its entity's spot, then nudged out of a crowd (`look::declutter`).
+    let mut placed = Vec::new();
     for (_, dot) in dots {
         let shade = if dot.depth_shade { look::depth_shade(dot.dy) } else { Some(1.) };
         let Some(shade) = shade else { continue };
@@ -4962,8 +4963,15 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
             ];
         }
         let [x,_,z] = position;
-        let [x,y] = world_screen(view,rect,[x,z]);
-        if !look::on_map(rect, round, [x, y]) { continue; }
+        let at = world_screen(view,rect,[x,z]);
+        if !look::on_map(rect, round, at) { continue; }
+        placed.push((dot, at, shade));
+    }
+    let anchors: Vec<[f32; 2]> = placed.iter().map(|(_, at, _)| *at).collect();
+    let sizes: Vec<f32> = placed.iter().map(|(dot, _, _)| if dot.icon { 8. * scale * dot.icon_scale + 1. } else { dot.size + 2. }).collect();
+    let parted = look::declutter(&anchors, &sizes, look::CROWD_REACH * scale);
+    let mut labels = Vec::new();
+    for ((dot, _, shade), [x, y]) in placed.into_iter().zip(parted) {
         let alpha = u32::from(dot.alpha);
         let head = if dot.icon {
             draw_head(game,batch,mobs.get(&dot.entity_id).copied(),dot,[x,y],scale*dot.icon_scale,alpha,shade)
@@ -6088,10 +6096,34 @@ fn ui(key: &str) -> String {
 /// reverse a line without letters (`-32, 69, 0` becoming `0 ,69 ,32-`), so such a line is laid
 /// out one character at a time.
 fn draw_text(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2], color: u32, shadow: bool) {
-    if !runtime::right_to_left() || text.chars().any(char::is_alphabetic) {
+    if !runtime::right_to_left() {
         game.map_text(batch, text, at, color, shadow);
         return;
     }
+    if text.chars().any(char::is_alphabetic) {
+        let runs = runtime::arabic::number_runs(text);
+        if runs.len() < 2 || !text.chars().any(|c| ('\u{0590}'..='\u{08ff}').contains(&c)) {
+            game.map_text(batch, text, at, color, shadow);
+            return;
+        }
+        // Numbers inside right-to-left words keep their own order (`-3 / 10`, not `3- / 10`):
+        // the runs go right to left, each number drawn left to right.
+        let mut x = at[0] + runs.iter().map(|(_, run)| game.map_text_width(run)).sum::<f32>();
+        for (number, run) in runs {
+            x -= game.map_text_width(run);
+            if number {
+                draw_text_ltr(game, batch, run, [x, at[1]], color, shadow);
+            } else {
+                game.map_text(batch, run, [x, at[1]], color, shadow);
+            }
+        }
+        return;
+    }
+    draw_text_ltr(game, batch, text, at, color, shadow);
+}
+
+/// Text without letters laid out one character at a time, left to right.
+fn draw_text_ltr(game: &Game<'_>, batch: &mut HudBatch, text: &str, at: [f32; 2], color: u32, shadow: bool) {
     let mut x = at[0];
     let mut buffer = [0u8; 4];
     for c in text.chars() {

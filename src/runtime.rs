@@ -220,6 +220,45 @@ pub mod arabic {
         TABLE.iter().find(|(en, _)| *en == english).map(|(_, ar)| *ar)
     }
 
+    /// `text` cut into runs, each a number or coordinate group (`-3 / 10`, `-32, 69, 0`, `1.5`,
+    /// marked `true`) or the text between them. Right-to-left drawing lays the runs out itself
+    /// and draws each number left to right: the game's font draws the Unicode direction marks
+    /// (LRI, PDI, LRM) as visible boxes, so they cannot be used.
+    pub fn number_runs(text: &str) -> Vec<(bool, &str)> {
+        let inner = |c: char| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | ',' | ':' | ';' | '/' | ' ' | '×' | '~' | '≈');
+        let bytes: Vec<(usize, char)> = text.char_indices().collect();
+        let mut runs = Vec::new();
+        let mut from = 0;
+        let mut i = 0;
+        while i < bytes.len() {
+            let (at, c) = bytes[i];
+            let sign = matches!(c, '-' | '+' | '~' | '≈') && bytes.get(i + 1).is_some_and(|(_, n)| n.is_ascii_digit());
+            if !(c.is_ascii_digit() || sign) {
+                i += 1;
+                continue;
+            }
+            let mut end = i;
+            let mut j = i;
+            while j < bytes.len() && inner(bytes[j].1) {
+                if bytes[j].1.is_ascii_digit() {
+                    end = j;
+                }
+                j += 1;
+            }
+            if at > from {
+                runs.push((false, &text[from..at]));
+            }
+            let stop = bytes[end].0 + bytes[end].1.len_utf8();
+            runs.push((true, &text[at..stop]));
+            from = stop;
+            i = end + 1;
+        }
+        if from < text.len() {
+            runs.push((false, &text[from..]));
+        }
+        runs
+    }
+
     /// The Arabic of a formatted line: `english` is `template` filled in; its values go into the
     /// Arabic template's `{}` in the same order. Without an Arabic template, the English.
     pub fn format(template: &str, english: &str) -> String {
@@ -271,6 +310,11 @@ pub mod arabic {
             "القطع المفصّلة المحفوظة: 12؛ آثار LOD: 0"
         );
         assert_eq!(format("not in the table {}", "not in the table x"), "not in the table x");
+        assert_eq!(number_runs("القطعة: -3 / 10"), vec![(false, "القطعة: "), (true, "-3 / 10")]);
+        assert_eq!(number_runs("الموقع -32, 69, 0 هنا"), vec![(false, "الموقع "), (true, "-32, 69, 0"), (false, " هنا")]);
+        assert_eq!(number_runs("(32×32 قطعة)"), vec![(false, "("), (true, "32×32"), (false, " قطعة)")]);
+        assert_eq!(number_runs("no numbers - here"), vec![(false, "no numbers - here")]);
+        assert_eq!(number_runs(""), vec![]);
         assert!(super::arabic::TABLE.iter().all(|(en, ar)| en.matches('{').count() == ar.matches('{').count()));
     }
     const TABLE: &[(&str, &str)] = &[
