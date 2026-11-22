@@ -826,7 +826,8 @@ pub struct WaypointForm {
     pub set: Rect,
     pub color: Rect,
     pub name: Rect,
-    pub coords: [Rect; 3],
+    /// x, y, z and yaw.
+    pub coords: [Rect; 4],
     pub world_3d: Rect,
     pub initials: Rect,
     pub enabled: Rect,
@@ -843,7 +844,7 @@ pub fn waypoint_form(screen: [f32; 2], rtl: bool) -> WaypointForm {
     let left = cx - wide * 0.5;
     let field = 50.0;
     let gap = 6.0;
-    let coords_left = cx - (3.0 * field + 2.0 * gap) * 0.5;
+    let coords_left = cx - (4.0 * field + 3.0 * gap) * 0.5;
     let toggle = 79.0;
     let row = toggle * 2.0 + field + 2.0 * gap;
     let row_left = cx - row * 0.5;
@@ -867,7 +868,7 @@ pub fn waypoint_form(screen: [f32; 2], rtl: bool) -> WaypointForm {
 
 /// The nine pieces of a nine-slice sprite drawn into `dst`: `(src, dst)` pairs, `src` in the
 /// sprite's texels. `size` is the sprite's texel size, `border` its border in texels and
-/// `texel` the GUI size of one texel's border (1 at the vanilla pack's resolution).
+/// `texel` the GUI size of one texel (1 at the vanilla pack's resolution).
 pub fn nine_slice(dst: Rect, size: [f32; 2], border: f32, texel: f32) -> Vec<(Rect, Rect)> {
     let [x, y, w, h] = dst;
     let b = (border * texel).min(w * 0.5).min(h * 0.5);
@@ -878,7 +879,8 @@ pub fn nine_slice(dst: Rect, size: [f32; 2], border: f32, texel: f32) -> Vec<(Re
     for (py, ph, sy, sh) in ys {
         for (px, pw, sx, sw) in xs {
             if pw > 0.0 && ph > 0.0 {
-                pieces.push(([sx, sy, sw, sh], [px, py, pw, ph]));
+                // A piece narrower than its texels shows their start, as vanilla's tiling does.
+                pieces.push(([sx, sy, sw.min(pw / texel), sh.min(ph / texel)], [px, py, pw, ph]));
             }
         }
     }
