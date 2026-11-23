@@ -596,8 +596,10 @@ fn gather<'a>(
     let mut dots = Vec::new();
     for entity in level.entities_in(
         host,
-        [x - radius, y - query_height, z - radius],
-        [x + radius, y + query_height, z + radius],
+        // One block more than the limit so an entity exactly at the limit is found (the limit
+        // itself is inclusive below).
+        [x - radius, y - query_height - 1., z - radius],
+        [x + radius, y + query_height + 1., z + radius],
     )? {
         if entity == player || (hide_invisible && entity.is_invisible(host) == Some(true)) {
             continue;

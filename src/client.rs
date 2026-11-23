@@ -2680,9 +2680,11 @@ fn world_camera(
 fn waypoint_distance_text(game:&Game<'_>,meters:f64) -> String {
     let limit=game.map_number("waypoint_km_at").unwrap_or(-1.);
     let precision=usize::from(game.map_option("waypoint_dist_precision").unwrap_or(1));
-    // Xaero's form: one decimal and the unit right after (`205.9m`).
-    if limit>=0. && meters>=limit {format!("{value:.precision$}km",value=meters/1000.)}
-    else {format!("{meters:.precision$}m")}
+    // Xaero's form: one decimal and the unit right after (`205.9m`); Arabic writes its own
+    // units after a space (`205.9 م`).
+    let (m, km) = if matches!(language(), Language::Arabic) {(" م", " كم")} else {("m", "km")};
+    if limit>=0. && meters>=limit {format!("{value:.precision$}{km}",value=meters/1000.)}
+    else {format!("{meters:.precision$}{m}")}
 }
 
 fn waypoint_label_left(x: f32, marker_width: f32, text_width: f32, viewport_width: f32) -> f32 {
@@ -4905,7 +4907,12 @@ fn draw_head(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client:
     let model = mob.kind.layer(&model_key).unwrap_or(&mob.kind.model);
     let sprite = game.gui.atlas.sprites.get(texture.as_ref())?;
     let head = radar_head(model).unwrap_or(model);
-    let face = head.polygons.iter().filter(|face| face.normal[2] < -0.5)
+    // A head part may only group its cubes (the wolf's `head` holds `real_head`): then its
+    // face is the largest front face of the first level below that has one. Hats and other
+    // overlays under a head with its own faces are never taken.
+    let mut faces = Vec::new();
+    radar_faces(head, &mut faces);
+    let face = faces.into_iter().filter(|face| face.normal[2] < -0.5)
         .max_by(|a,b| radar_uv_area(a).total_cmp(&radar_uv_area(b)))?;
     let [u0,v0,u1,v1] = radar_uv(face);
     if u0 >= u1 || v0 >= v1 || u0 < 0. || v0 < 0. || u1 > 1. || v1 > 1. { return None; }
@@ -4922,6 +4929,14 @@ fn radar_head(part: &horizon_client::mobs::Part) -> Option<&horizon_client::mobs
     part.children.iter().find_map(radar_head)
 }
 
+fn radar_faces<'a>(part: &'a horizon_client::mobs::Part, out: &mut Vec<&'a horizon_client::mobs::Polygon>) {
+    if part.polygons.iter().any(|face| face.normal[2] < -0.5) {
+        out.extend(part.polygons.iter());
+        return;
+    }
+    for child in &part.children { radar_faces(child, out); }
+}
+
 fn radar_uv(face: &horizon_client::mobs::Polygon) -> [f32;4] {
     let mut bounds = [f32::INFINITY,f32::INFINITY,f32::NEG_INFINITY,f32::NEG_INFINITY];
     for [_,_,_,u,v] in face.vertices {
@@ -4933,6 +4948,30 @@ fn radar_uv(face: &horizon_client::mobs::Polygon) -> [f32;4] {
 fn radar_uv_area(face: &horizon_client::mobs::Polygon) -> f32 {
     let [u0,v0,u1,v1] = radar_uv(face);
     (u1-u0)*(v1-v0)
+}
+
+/// The merged face under the pointer on the world map: its tooltip and the face's rectangle.
+static RADAR_HOVER: Mutex<Option<(Vec<Vec<(String, u32)>>, [f32; 4])>> = Mutex::new(None);
+
+/// A merged face's tooltip: the kind with its count, then each member's distance, nearest
+/// first.
+fn group_lines<'a>(game: &Game<'_>, members: impl Iterator<Item = &'a ::map::radar::Dot>) -> Vec<Vec<(String, u32)>> {
+    let player = game.native_player();
+    let mut members: Vec<(&::map::radar::Dot, f64)> = members.map(|dot| {
+        let d = player.as_ref().map_or(0., |p| ((dot.at[0] - p.x).powi(2) + (dot.at[1] - p.y).powi(2) + (dot.at[2] - p.z).powi(2)).sqrt());
+        (dot, d)
+    }).collect();
+    members.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let Some((first, _)) = members.first() else { return Vec::new() };
+    let key = format!("entity.{}", first.kind.replace(':', "."));
+    let name = game.translate(&key).filter(|name| *name != key)
+        .unwrap_or_else(|| first.kind.rsplit(':').next().unwrap_or(&first.kind).replace('_', " "));
+    let mut lines = vec![vec![(format!("{name} ×{}", members.len()), look::TOOLTIP_TEXT)]];
+    lines.extend(members.iter().take(8).map(|(_, d)| vec![(waypoint_distance_text(game, *d), look::GREY_TEXT)]));
+    if members.len() > 8 {
+        lines.push(vec![(format!("+{}", members.len() - 8), look::GREY_TEXT)]);
+    }
+    lines
 }
 
 fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], round: bool, after_frame: bool) {
@@ -4964,18 +5003,42 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
         }
         let [x,_,z] = position;
         let at = world_screen(view,rect,[x,z]);
-        if !look::on_map(rect, round, at) { continue; }
+        // A face whose box still reaches into the map is drawn, cut by the map's edge (Xaero).
+        let half = if dot.icon { 4. * scale * dot.icon_scale } else { dot.size * 0.5 };
+        if !look::reaches_map(rect, round, at, half) { continue; }
         placed.push((dot, at, shade));
     }
     let anchors: Vec<[f32; 2]> = placed.iter().map(|(_, at, _)| *at).collect();
     let sizes: Vec<f32> = placed.iter().map(|(dot, _, _)| if dot.icon { 8. * scale * dot.icon_scale + 1. } else { dot.size + 2. }).collect();
-    let parted = look::declutter(&anchors, &sizes, look::CROWD_REACH * scale);
+    // Faces of one mob kind that would overlap become one face with a stack count
+    // (`look::group`); players, items, named mobs and dots stay single. Then kinds part.
+    let keys: Vec<Option<u64>> = placed.iter().map(|(dot, _, _)| {
+        (dot.icon && dot.label.is_none() && dot.kind != "minecraft:player" && dot.kind != "minecraft:item")
+            .then(|| dot.kind.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)))
+    }).collect();
+    let groups = look::group(&anchors, &sizes, &keys);
+    let centres: Vec<[f32; 2]> = groups.iter().map(|g| g.at).collect();
+    let sides: Vec<f32> = groups.iter().map(|g| g.side).collect();
+    let parted = look::declutter(&centres, &sides, look::CROWD_REACH * scale);
+    let mouse = view.large.then(|| game.cursor());
     let mut labels = Vec::new();
-    for ((dot, _, shade), [x, y]) in placed.into_iter().zip(parted) {
-        let alpha = u32::from(dot.alpha);
+    let mut hover = None;
+    for (group, [x, y]) in groups.iter().zip(parted) {
+        let (dot, _, _) = placed[group.members[0]];
+        // The group's face: its nearest member's, the least shaded.
+        let shade = group.members.iter().map(|&m| placed[m].2).fold(0f32, f32::max);
+        let alpha = group.members.iter().map(|&m| u32::from(placed[m].0.alpha)).max().unwrap_or(255);
         let head = if dot.icon {
             draw_head(game,batch,mobs.get(&dot.entity_id).copied(),dot,[x,y],scale*dot.icon_scale,alpha,shade)
         } else { None };
+        if let Some(face) = head && group.members.len() > 1 {
+            let count = group.members.len().to_string();
+            let (at, size) = look::stack_count(face, game.map_text_width(&count));
+            small_text(game, batch, &count, at, size, (alpha << 24) | 0x00ff_ffff, Some((alpha << 24) | look::text_shadow(0xff_ffff)));
+            if let Some(mouse) = mouse && look::contains(face, [mouse[0], mouse[1], 0., 0.]) {
+                hover = Some((group_lines(game, group.members.iter().map(|&m| placed[m].0)), face));
+            }
+        }
         let shape = head.unwrap_or_else(|| {
             let half = dot.size*0.5;
             let level = (shade * 255.) as u32;
@@ -4989,6 +5052,9 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
         if let Some(label) = label {
             labels.push((label,alpha,shape));
         }
+    }
+    if view.large {
+        *RADAR_HOVER.lock().unwrap_or_else(|error| error.into_inner()) = hover;
     }
     for (label,alpha,head) in labels.into_iter().rev().take(if view.large {48} else {24}).collect::<Vec<_>>().into_iter().rev() {
         let width = game.map_text_width(label);
@@ -6574,6 +6640,10 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 else {format!("{}  ({} {} {})",waypoint.name,waypoint.x,waypoint.y,waypoint.z)}, look::TOOLTIP_TEXT)]],
                 [body[0], body[1], body[2], at[1] - body[1]]));
         }
+    }
+    if tooltip.is_none() && !over_map_controls(game,state,mouse, batch.width, batch.height)
+        && let Some(group) = RADAR_HOVER.lock().unwrap_or_else(|error| error.into_inner()).take() {
+        tooltip = Some(group);
     }
     if game.map_option("world_cave_ceiling")==Some(1)
         && let Some(Layer::Below(y))=state.frame.as_ref().map(|frame|frame.view.layer) {
