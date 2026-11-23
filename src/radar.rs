@@ -16,6 +16,8 @@ const MAX_MARKERS: usize = 96;
 
 pub struct Dot {
     pub entity_id: u32,
+    /// The entity's radar group (`Group`).
+    pub group: u8,
     pub kind: String,
     pub at: [f64; 3],
     pub color: u32,
@@ -96,6 +98,8 @@ impl Rule {
 #[derive(Default)]
 pub struct Facts<'a> {
     pub item: Option<&'a str>,
+    /// A living thing: a mob, a player or an armour stand, as the game knows them.
+    pub living: bool,
     pub custom_name: Option<std::borrow::Cow<'a, str>>,
     pub hostile: bool,
     pub baby: bool,
@@ -193,7 +197,7 @@ impl Selector {
             Self::All => true,
             Self::Never => false,
             Self::Group(g) => group == *g,
-            Self::Living(wanted) => (group <= 1 || kind == "minecraft:armor_stand") == *wanted,
+            Self::Living(wanted) => facts.living == *wanted,
             Self::Namespace(vanilla) => kind.starts_with("minecraft:") == *vanilla,
             Self::Kind(id) => id == kind,
             Self::Player(name) => player.is_some_and(|p| p.eq_ignore_ascii_case(name)),
@@ -480,60 +484,6 @@ pub fn snapshot() -> Option<Arc<View>> {
     VIEW.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn category(id: &str) -> usize {
-    match id {
-        "minecraft:player" => 0,
-        "minecraft:item" => 2,
-        _ if id.starts_with("minecraft:") && is_utility(&id[10..]) => 3,
-        _ => 1,
-    }
-}
-
-fn is_utility(id: &str) -> bool {
-    id.ends_with("_boat")
-        || id.ends_with("_raft")
-        || id.ends_with("minecart")
-        || matches!(
-            id,
-            "armor_stand"
-                | "area_effect_cloud"
-                | "arrow"
-                | "block_display"
-                | "breeze_wind_charge"
-                | "dragon_fireball"
-                | "egg"
-                | "end_crystal"
-                | "ender_pearl"
-                | "evoker_fangs"
-                | "experience_bottle"
-                | "experience_orb"
-                | "eye_of_ender"
-                | "falling_block"
-                | "fireball"
-                | "firework_rocket"
-                | "fishing_bobber"
-                | "glow_item_frame"
-                | "interaction"
-                | "item_display"
-                | "item_frame"
-                | "leash_knot"
-                | "lightning_bolt"
-                | "llama_spit"
-                | "ominous_item_spawner"
-                | "painting"
-                | "potion"
-                | "shulker_bullet"
-                | "small_fireball"
-                | "snowball"
-                | "spectral_arrow"
-                | "text_display"
-                | "tnt"
-                | "trident"
-                | "wind_charge"
-                | "wither_skull"
-        )
-}
-
 fn default_name(host: &dyn ClientHost, id: &str) -> String {
     let key = format!("entity.{}", id.replace(':', "."));
     let name = host
@@ -554,12 +504,21 @@ pub fn sample_due(enabled: bool) -> bool {
     COUNTDOWN.fetch_add(1, Ordering::Relaxed) % 4 == 0
 }
 
+/// Which radar group an entity is in: 0 a player, 1 a mob, 2 a dropped item, 3 anything else.
+/// The game says which (its players, mobs and items), so a mod's entities sort themselves.
+pub type Group = usize;
+pub const PLAYER: Group = 0;
+pub const MOB: Group = 1;
+pub const ITEM: Group = 2;
+pub const OTHER: Group = 3;
+
 pub fn update<'a>(
     host: &dyn ClientHost,
     setting: impl Fn(&str) -> f64,
+    group: impl Fn(u32) -> Group,
     facts: impl Fn(u32, &str, [f64; 3]) -> Facts<'a>,
 ) {
-    let view = gather(host, &setting, facts).map(Arc::new);
+    let view = gather(host, &setting, &group, facts).map(Arc::new);
     *VIEW.lock().unwrap_or_else(|e| e.into_inner()) = view;
 }
 
@@ -575,6 +534,7 @@ fn mode(value: Option<u8>, default: bool, listed: bool) -> bool {
 fn gather<'a>(
     host: &dyn ClientHost,
     setting: &impl Fn(&str) -> f64,
+    group_of: &impl Fn(u32) -> Group,
     facts: impl Fn(u32, &str, [f64; 3]) -> Facts<'a>,
 ) -> Option<View> {
     let player = host.local_player()?.entity();
@@ -615,7 +575,7 @@ fn gather<'a>(
             continue;
         };
         let id = kind.id(host);
-        let group = category(&id);
+        let group = group_of(entity.id());
         let mut name = if group == 0
             && (imported.is_some() || rules.as_ref().is_some_and(|r| !r.players.is_empty()))
         {
@@ -692,6 +652,7 @@ fn gather<'a>(
             });
         let dot = Dot {
             entity_id: entity.id(),
+            group: group as u8,
             kind: id,
             at,
             color,
@@ -753,15 +714,6 @@ fn gather<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn differentiates_players_mobs_items_and_projectiles() {
-        assert_eq!(category("minecraft:player"), 0);
-        assert_eq!(category("minecraft:camel_husk"), 1);
-        assert_eq!(category("minecraft:item"), 2);
-        assert_eq!(category("minecraft:spectral_arrow"), 3);
-        assert_eq!(category("minecraft:cherry_chest_boat"), 3);
-    }
 
     #[test]
     fn radar_rules_validate_a_category_before_applying_it() {
