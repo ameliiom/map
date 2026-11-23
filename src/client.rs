@@ -4885,7 +4885,8 @@ struct Icon {
 }
 
 /// Icons made so far, by what decides their look (`icon_key`), and how often they were used.
-static ICONS: Mutex<Option<std::collections::HashMap<String, Arc<Icon>>>> = Mutex::new(None);
+/// A look that gives no icon is kept too (`None`), so it is not tried again every frame.
+static ICONS: Mutex<Option<std::collections::HashMap<String, Option<Arc<Icon>>>>> = Mutex::new(None);
 
 /// The most icons kept: every kind and variant on screen at once fits many times over.
 const ICONS_KEPT: usize = 256;
@@ -4924,7 +4925,7 @@ fn mob_icon(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> Opt
     if let Some(icon) = icons.get(&key) {
         ICON_COST.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         runtime::profiling::record("radar-icon-hit", Duration::ZERO, 1, 0);
-        return Some(icon.clone());
+        return icon.clone();
     }
     let started = Instant::now();
     let icon = make_icon(game, mob).map(Arc::new);
@@ -4934,9 +4935,7 @@ fn mob_icon(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> Opt
     if icons.len() >= ICONS_KEPT {
         icons.clear();
     }
-    if let Some(icon) = &icon {
-        icons.insert(key, icon.clone());
-    }
+    icons.insert(key, icon.clone());
     icon
 }
 
@@ -4962,6 +4961,11 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
             if n.z >= 0. && horizon_client::mesher::culls_back(q[0].normal) {
                 return None;
             }
+            // A face seen edge-on (a hat brim) shows nothing, and so outlines nothing.
+            let span = |axis: usize| p.iter().map(|v| v[axis]).fold(f32::NEG_INFINITY, f32::max) - p.iter().map(|v| v[axis]).fold(f32::INFINITY, f32::min);
+            if span(0) < 0.05 || span(1) < 0.05 {
+                return None;
+            }
             let depth = p.iter().map(|v| v.z).sum::<f32>() / 4.;
             Some((depth, p.map(|v| v.to_array()), std::array::from_fn(|i| q[i].uv), q[0].color))
         }).collect()
@@ -4978,52 +4982,88 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
     let (model, _) = render::body(&mob);
     let model = mob.kind.layer(&model).unwrap_or(&mob.kind.model);
     let whole = vanilla(Default::default());
+    let key = |p: &[[f32; 3]; 4]| [p[0][0].to_bits(), p[0][1].to_bits(), p[2][0].to_bits()];
+    // Quads by place: a layer drawn over the head (spots, eyes) repeats its places, so what the
+    // hidden head loses is counted, not just looked up.
+    let mut rest: std::collections::HashMap<[u32; 3], usize> = Default::default();
+    let mut lost_keys: std::collections::HashSet<[u32; 3]> = Default::default();
     let head: Vec<_> = match head_part(model) {
         Some(name) => {
             let mut hidden = mod_api::HiddenParts::default();
-            hidden.hide_named(name).ok()?;
-            let rest: std::collections::HashSet<[u32; 3]> = vanilla(hidden).iter()
-                .map(|(_, p, ..)| [p[0][0].to_bits(), p[0][1].to_bits(), p[2][0].to_bits()]).collect();
-            whole.iter().filter(|(_, p, ..)| !rest.contains(&[p[0][0].to_bits(), p[0][1].to_bits(), p[2][0].to_bits()])).collect()
+            if let Err(error) = hidden.hide_named(name) {
+                log::warn!("[{}] no head icon for {}: its head part {name} cannot be hidden ({error:?})", runtime::MOD_ID, mob.kind.id);
+                return None;
+            }
+            for (_, p, ..) in vanilla(hidden).iter() {
+                *rest.entry(key(p)).or_default() += 1;
+            }
+            let mut counts: std::collections::HashMap<[u32; 3], usize> = Default::default();
+            for (_, p, ..) in &whole {
+                *counts.entry(key(p)).or_default() += 1;
+            }
+            lost_keys = counts.into_iter().filter(|(k, n)| *n > rest.get(k).copied().unwrap_or(0)).map(|(k, _)| k).collect();
+            let lost: Vec<_> = whole.iter().filter(|(_, p, ..)| lost_keys.contains(&key(p))).collect();
+            // A renderer that draws its head whatever is hidden (a breeze): the whole entity,
+            // as for a mob without a head part.
+            if lost.is_empty() {
+                rest.clear();
+                whole.iter().collect()
+            } else {
+                lost
+            }
         }
         None => whole.iter().collect(),
     };
-    let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
-    for (_, p, ..) in &head {
-        for v in p {
-            bounds = [bounds[0].min(v[0]), bounds[1].min(v[1]), bounds[2].max(v[0]), bounds[3].max(v[1])];
-        }
-    }
-    if !bounds.iter().all(|v| v.is_finite()) {
+    // The face, in model pixels (the model's own scale taken out, so a donkey and a horse are
+    // framed alike): what lies too far behind the face plate goes, a neck below it too.
+    let unit = model.pose[6].abs().max(0.01);
+    let rect = |p: &[[f32; 3]; 4]| {
+        let (x0, x1) = p.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v[0]), b.max(v[0])));
+        let (y0, y1) = p.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v[1]), b.max(v[1])));
+        [x0 / unit, y0 / unit, (x1 - x0) / unit, (y1 - y0) / unit]
+    };
+    let Some((deepest, frame)) = look::face_frame(&head.iter().map(|(z, p, ..)| (*z / unit, rect(p))).collect::<Vec<_>>()) else {
+        log::warn!("[{}] no head icon for {}: {} head faces of {} drawn, none a face plate", runtime::MOD_ID, mob.kind.id, head.len(), whole.len());
         return None;
-    }
-    // How deep the head goes (model pixels towards the viewer): what lies behind it, as a body
-    // seen past the head, is not the head.
-    let deep = head.iter().fold([f32::INFINITY, f32::NEG_INFINITY], |d, (z, ..)| [d[0].min(*z), d[1].max(*z)]);
-    // Everything the game draws for the entity (a mod's renderer and layers too) that lies on
-    // the head: its eyes, wool, hat, bridle; a layer may stand a pixel off it (wool).
+    };
+    let frame = frame.map(|v| v * unit);
+    // Everything the game draws for the entity (a mod's renderer and layers too) on that face:
+    // its eyes, wool, hat, bridle; a layer may stand a pixel off it (wool).
     let mut all = Vec::new();
     game.gui_entity_geometry(&mob, &mut all);
     let mut quads = seen(&all);
-    let margin = 1.;
-    let inside = |p: &[[f32; 3]; 4]| p.iter().all(|v| {
-        v[0] >= bounds[0] - margin && v[0] <= bounds[2] + margin && v[1] >= bounds[1] - margin && v[1] <= bounds[3] + margin
-    });
-    quads.retain(|(z, p, ..)| inside(p) && *z >= deep[0] - margin && *z <= deep[1] + margin);
+    let margin = unit;
+    // The head's own box: the rest of the body (arms held up to the chin, a collar) is drawn
+    // only where it lies wholly on the head, as a sheep's wool does.
+    let own = head.iter().flat_map(|(_, p, ..)| p.iter()).fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+        |b, v| [b[0].min(v[0]), b[1].min(v[1]), b[2].max(v[0]), b[3].max(v[1])]);
+    let on_head = |p: &[[f32; 3]; 4]| lost_keys.contains(&key(p)) || !rest.contains_key(&key(p))
+        || p.iter().all(|v| v[0] >= own[0] - margin && v[0] <= own[2] + margin && v[1] >= own[1] - margin && v[1] <= own[3] + margin);
+    let on_face = |z: f32, p: &[[f32; 3]; 4]| {
+        on_head(p)
+            && z >= deepest * unit - margin
+            && p.iter().all(|v| v[0] >= frame[0] - margin && v[0] <= frame[0] + frame[2] + margin && v[1] >= frame[1] - margin)
+            && p.iter().any(|v| v[1] < frame[1] + frame[3] - unit * 0.5)
+    };
+    quads.retain(|(z, p, ..)| on_face(*z, p));
+    if quads.is_empty() {
+        log::warn!("[{}] no head icon for {}: nothing drawn on its face", runtime::MOD_ID, mob.kind.id);
+        return None;
+    }
     quads.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Framed on what was kept, down to the frame's foot (a neck through it is cut there).
     let mut box_ = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
     for (_, p, ..) in &quads {
         for v in p {
             box_ = [box_[0].min(v[0]), box_[1].min(v[1]), box_[2].max(v[0]), box_[3].max(v[1])];
         }
     }
-    if quads.is_empty() {
-        return None;
-    }
+    box_[3] = box_[3].min(frame[1] + frame[3]);
     let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
     Some(Icon {
-        quads: quads.into_iter().map(|(_, p, uv, color)| (p.map(|v| [v[0] - centre[0], v[1] - centre[1]]), uv, color)).collect(),
-        size: [box_[2] - box_[0], box_[3] - box_[1]],
+        // One texture pixel to one GUI pixel, whatever the model's own scale (a ghast, a villager), as Xaero draws.
+        quads: quads.into_iter().map(|(_, p, uv, color)| (p.map(|v| [(v[0] - centre[0]) / unit, (v[1] - centre[1]) / unit]), uv, color)).collect(),
+        size: [(box_[2] - box_[0]) / unit, (box_[3] - box_[1]) / unit],
     })
 }
 
@@ -5033,6 +5073,7 @@ fn draw_icon(batch: &mut HudBatch, icon: &Icon, at: [f32; 2], scale: f32, alpha:
     let pixel = 1. / batch.scale.max(1.);
     let place = |p: &[[f32; 2]; 4], [dx, dy]: [f32; 2]| p.map(|v| [at[0] + v[0] * scale + dx, at[1] + v[1] * scale + dy, 0.]);
     let outline = alpha << 24;
+    let start = batch.vertices.len();
     for offset in look::outline_offsets(pixel) {
         for (p, uv, _) in &icon.quads {
             batch.quad_3d(place(p, offset), *uv, outline);
@@ -5044,7 +5085,10 @@ fn draw_icon(batch: &mut HudBatch, icon: &Icon, at: [f32; 2], scale: f32, alpha:
         let a = ((color >> 24) * alpha / 255) << 24;
         batch.quad_3d(place(p, [0., 0.]), *uv, a | channel(16) | channel(8) | channel(0));
     }
-    look::head_rect(at, icon.size, scale)
+    // A neck that runs on below the face is cut at the frame's foot, outline included.
+    let frame = look::head_rect(at, icon.size, scale);
+    batch.clip_since(start, frame[0] - pixel, frame[1] - pixel, frame[0] + frame[2] + pixel, frame[1] + frame[3] + pixel);
+    frame
 }
 
 /// The merged face under the pointer on the world map: its tooltip and the face's rectangle.
