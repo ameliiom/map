@@ -9,6 +9,16 @@ A minimap and a world map for [Horizon](https://playhorizon.dev) (Minecraft: Jav
 - **With [Team](https://github.com/ameliiom/team)** (0.3 or later, optional): each teammate's face on both maps (on the edge of the minimap when far) and every ping as a pennant in its owner's colour, with a sword for danger and the block for loot.
 - Cave view, chunk grid, slime chunks, light overlay, footsteps, PNG export, and import of Xaero's waypoints and settings.
 
+## Map icons
+Every creature on the maps has an icon of one size. Map draws it from the creature's own model: the front of its head with whatever stands on it. A resource pack or a mod can supply its own icon instead, for any entity of any namespace:
+
+```
+assets/<namespace>/textures/map/icons/<entity>.png
+assets/<namespace>/textures/map/icons/<entity>/<variant>.png
+```
+
+`<entity>` is the entity type's path (`pig` for `minecraft:pig`, `frost_wolf` for `acme:frost_wolf`). `<variant>` is the name of the texture the entity is drawn with (`cold_cow`), and it is used first when it exists. Use a square image such as 8×8 or 16×16. Map scales it to the icon box and draws the black outline itself.
+
 ## Install
 1. Copy `map.hmod` into `%APPDATA%\horizon\horizon-native-mods\`.
 2. Add the line `mod.map:true` to `%APPDATA%\horizon\horizon-mods.txt`.

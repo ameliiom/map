@@ -619,6 +619,38 @@ pub fn crosshair(at: Point) -> [Rect; 3] {
     ]
 }
 
+/// The one box every entity icon fits, in texels: the size of a normal 8 x 8 head (16 screen
+/// pixels at GUI scale 2, as Xaero draws one). Tiny faces grow to it, big ones shrink to it.
+pub const ICON_BOX: f32 = 8.0;
+
+/// The images a resource pack or a mod may give an entity type `kind` (`namespace:path`, any
+/// namespace) as its map icon, first found wins: one for its variant (named after the variant's
+/// texture), then one for the type, at `assets/<namespace>/textures/map/icons/`.
+pub fn icon_override_names(kind: &str, variant: &str) -> [String; 2] {
+    let (namespace, path) = kind.split_once(':').unwrap_or(("minecraft", kind));
+    [format!("{namespace}:map/icons/{path}/{variant}"), format!("{namespace}:map/icons/{path}")]
+}
+
+/// The scale that fits an icon of `size` into the box: its longer side becomes the box.
+pub fn icon_fit(size: [f32; 2], scale: f32) -> f32 {
+    ICON_BOX * scale / size[0].max(size[1]).max(0.01)
+}
+
+/// An icon is far from square when one side is more than this many times the other.
+pub const FAR_FROM_SQUARE: f32 = 2.5;
+
+/// The part of an icon's front view `bounds` that is its face. A body drawn whole (a model
+/// with no head part: a squid, a ghast) or a head far taller than wide is framed on its top
+/// square, width by width from the top; anything else stays whole.
+pub fn icon_frame(bounds: Rect, whole: bool) -> Rect {
+    let [x, y, w, h] = bounds;
+    if (whole && h > w) || h > w * FAR_FROM_SQUARE {
+        [x, y, w, w]
+    } else {
+        bounds
+    }
+}
+
 /// A head's rectangle: `texels` of the face, one texel per GUI pixel times `scale`, centred on
 /// the entity.
 pub fn head_rect(at: Point, texels: [f32; 2], scale: f32) -> Rect {
@@ -1410,6 +1442,46 @@ mod tests {
         assert_eq!(face_frame(&mole).unwrap(), [-4.0, -16.0, 8.0, 16.0]);
         let brim = vec![(0.0, [-8.0, -6.0, 16.0, 1.0]), (-4.0, [-4.0, -10.0, 8.0, 10.0]), (-2.0, [-1.0, -3.0, 2.0, 4.0])];
         assert_eq!(face_chin(&brim).unwrap(), 1.0, "the chin is the nose's, below the face");
+    }
+
+    #[test]
+    fn icon_overrides_are_looked_up_in_the_entity_s_own_namespace() {
+        assert_eq!(
+            icon_override_names("acme_beasts:frost_wolf", "frost_wolf_snowy"),
+            ["acme_beasts:map/icons/frost_wolf/frost_wolf_snowy".to_owned(), "acme_beasts:map/icons/frost_wolf".to_owned()]
+        );
+        assert_eq!(icon_override_names("minecraft:cow", "cold_cow")[0], "minecraft:map/icons/cow/cold_cow");
+        assert_eq!(icon_override_names("pig", "pig")[1], "minecraft:map/icons/pig", "no namespace is Minecraft's");
+    }
+
+    #[test]
+    fn every_icon_fits_one_box_and_is_a_face() {
+        // Any size, tiny to giant, wide or tall: its longer side becomes the box.
+        for w in [1.0_f32, 2.0, 4.0, 8.0, 16.0, 48.0, 64.0] {
+            for h in [1.0_f32, 3.0, 8.0, 25.0, 64.0] {
+                for scale in [0.5_f32, 1.0, 2.0] {
+                    let fit = icon_fit([w, h], scale);
+                    let longer = w.max(h) * fit;
+                    assert!((longer - ICON_BOX * scale).abs() < 1e-3, "{w}x{h} at {scale}: {longer}");
+                    assert!(w * fit <= ICON_BOX * scale + 1e-3 && h * fit <= ICON_BOX * scale + 1e-3);
+                }
+                // A whole body taller than wide keeps its top square; a head far from square
+                // too; everything else stays as it is.
+                let bounds = [-w / 2.0, -h, w, h];
+                for whole in [false, true] {
+                    let frame = icon_frame(bounds, whole);
+                    assert_eq!(frame[0..3], bounds[0..3], "same top, same width");
+                    assert!(frame[3] <= h + 1e-6);
+                    if whole && h > w || h > w * FAR_FROM_SQUARE {
+                        assert_eq!(frame[3], w, "the top square");
+                    } else {
+                        assert_eq!(frame, bounds);
+                    }
+                    // After framing, no icon is far from square in height.
+                    assert!(frame[3] <= frame[2] * FAR_FROM_SQUARE + 1e-4);
+                }
+            }
+        }
     }
 
     #[test]

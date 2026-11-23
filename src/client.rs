@@ -4688,41 +4688,44 @@ pub(super) fn tick_radar(game: &Game<'_>) {
             _ => 0.,
         });
     if !radar::sample_due(setting("radar")>0.) {return;}
-    if !radar::uses_categories() {
-        radar::update(game, setting, |_,_,_| Facts::default());
-        return;
-    }
     let mobs: horizon_client::fast_hash::FxHashMap<_,_> = game.mobs.iter().map(|mob| (mob.id,mob)).collect();
     let items: horizon_client::fast_hash::FxHashMap<_,_> = game.dropped.iter().map(|item| (item.id,item.stack.item.as_ref())).collect();
+    // The group of an entity from what the game knows it as: a player of the session, one of its
+    // mobs, one of its dropped items, or anything else. A mod's entities need nothing here.
+    let player = |id: u32| game.remote.as_ref().and_then(|remote| remote.player_uuid(id)).is_some();
+    let group = |id: u32| if player(id) { radar::PLAYER } else if items.contains_key(&id) { radar::ITEM }
+        else if mobs.contains_key(&id) { radar::MOB } else { radar::OTHER };
+    if !radar::uses_categories() {
+        radar::update(game, setting, group, |_,_,_| Facts::default());
+        return;
+    }
     let own_team = game.player_team().map(|team| team.name.as_str());
     let own_uuid = game.own_uuid();
     let cave = game.native_player().is_some_and(|player| {
         matches!(state().layers.get(&Dimension::from_id(player.dimension)),Some(Layer::Below(_)))
     });
     let tracked = LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner());
-    radar::update(game,setting,|id,kind,at| {
+    radar::update(game,setting,group,|id,_kind,at| {
         let mob = mobs.get(&id).copied();
         let team = mob.and_then(|mob| game.mob_team_of(mob)).or_else(|| game.mob_team(id));
         let name = team.map(|team| team.name.as_str());
         let baby = mob.is_some_and(|mob| mob.is_baby());
-        let is_tracked = kind=="minecraft:player" && game.remote.as_ref()
+        let is_tracked = game.remote.as_ref()
             .and_then(|remote| remote.player_uuid(id))
             .is_some_and(|uuid| tracked.iter().any(|point| point.id == WaypointId::Uuid(uuid)));
         Facts {
             item: items.get(&id).copied(),
+            living: mob.is_some() || player(id) || game.armor_stands.iter().any(|stand| stand.id == id),
             custom_name: mob.and_then(|mob| mob.custom_name.as_deref()).map(std::borrow::Cow::Borrowed)
-                .or_else(|| kind.eq("minecraft:armor_stand").then(|| {
-                    game.armor_stands.iter().find(|stand| stand.id==id)?.custom_name.as_ref()
-                        .map(|name| std::borrow::Cow::Owned(name.plain()))
-                }).flatten()),
+                .or_else(|| game.armor_stands.iter().find(|stand| stand.id==id)?.custom_name.as_ref()
+                    .map(|name| std::borrow::Cow::Owned(name.plain()))),
             baby,
-            hostile: game.difficulty_id()>0 && !(baby && kind=="minecraft:piglin")
-                && (kind=="minecraft:ender_dragon" || mob.is_some_and(|mob| mob.category()=="monster")),
+            hostile: game.difficulty_id()>0 && mob.is_some_and(|mob| mob.category()=="monster"),
             tamed: mob.is_some_and(|mob| {
                 let owned=|owner:[i32;4]| owner.into_iter().fold(0u128,|id,word|(id<<32)|u128::from(word as u32))==own_uuid;
                 if horizon_client::mobs::equine::is_equine(mob.species()) {
                     mob.extra.tame
-                } else if kind=="minecraft:fox" {
+                } else if mob.species() == horizon_client::mobs::Species::Fox {
                     horizon_client::mobs::fox::trusted_entities(mob).any(owned)
                 } else {
                     mob.extra.owner.is_some_and(owned)
@@ -4852,11 +4855,11 @@ fn draw_team(game: &Game<'_>, batch: &mut HudBatch, state: &State, view: &View, 
 
 /// What kind of thing a radar dot is, for the draw order.
 fn radar_kind(dot: &::map::radar::Dot, mob: Option<&horizon_client::mobs::Mob>) -> look::Kind {
-    match dot.kind.as_str() {
-        "minecraft:player" => look::Kind::Player,
-        "minecraft:item" => look::Kind::Item,
+    match dot.group as usize {
+        ::map::radar::PLAYER => look::Kind::Player,
+        ::map::radar::ITEM => look::Kind::Item,
         _ => match mob {
-            Some(mob) if mob.category() == "monster" || dot.kind == "minecraft:ender_dragon" => look::Kind::Hostile,
+            Some(mob) if mob.category() == "monster" => look::Kind::Hostile,
             Some(_) => look::Kind::Passive,
             None => look::Kind::Item,
         },
@@ -4893,10 +4896,14 @@ const ICONS_KEPT: usize = 256;
 
 /// What decides how an entity's head looks: its type, the textures and tints of its body and
 /// every layer the game would draw on it, its age, and a player's skin.
-fn icon_key(kind: &str, mob: &horizon_client::mobs::Mob) -> String {
+fn icon_key(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> String {
+    let game_atlas_stamp = || format!("|atlas {}x{} {}", game.gui.atlas.width, game.gui.atlas.height, game.gui.atlas.sprites.len());
     use horizon_client::mobs::render;
     let (model, texture) = render::body(mob);
     let mut key = format!("{kind}|{model}|{texture}|{:08x}|{}|{}", render::body_color(mob, 1.), mob.is_baby(), mob.skin.as_deref().unwrap_or(""));
+    // A resource reload builds a new atlas: icons (an override's, the generated quads' UVs) follow.
+    let atlas = &game_atlas_stamp();
+    key.push_str(atlas);
     for layer in render::layers(mob, 0.) {
         key.push_str(&format!("|{}:{}:{:08x}", layer.model, layer.texture, layer.color));
     }
@@ -4919,7 +4926,7 @@ fn head_part(model: &horizon_client::mobs::Part) -> Option<&str> {
 
 /// The entity's head icon, made once per look and kept (`ICONS`).
 fn mob_icon(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> Option<Arc<Icon>> {
-    let key = icon_key(kind, mob);
+    let key = icon_key(game, kind, mob);
     let mut icons = ICONS.lock().unwrap_or_else(|error| error.into_inner());
     let icons = icons.get_or_insert_with(Default::default);
     if let Some(icon) = icons.get(&key) {
@@ -4987,6 +4994,7 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
     // hidden head loses is counted, not just looked up.
     let mut rest: std::collections::HashMap<[u32; 3], usize> = Default::default();
     let mut lost_keys: std::collections::HashSet<[u32; 3]> = Default::default();
+    let mut whole_body = false;
     let head: Vec<_> = match head_part(model) {
         Some(name) => {
             let mut hidden = mod_api::HiddenParts::default();
@@ -5007,12 +5015,16 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
             // as for a mob without a head part.
             if lost.is_empty() {
                 rest.clear();
+                whole_body = true;
                 whole.iter().collect()
             } else {
                 lost
             }
         }
-        None => whole.iter().collect(),
+        None => {
+            whole_body = true;
+            whole.iter().collect()
+        }
     };
     // The face, in model pixels (the model's own scale taken out): everything of the head above
     // its chin, a neck below it never (`look::face_frame`).
@@ -5055,6 +5067,11 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
         }
     }
     box_[3] = box_[3].min(chin);
+    // A body drawn whole (a squid, a ghast) or a head far from square keeps its top square.
+    let framed = look::icon_frame([box_[0], box_[1], box_[2] - box_[0], box_[3] - box_[1]], whole_body);
+    box_[3] = box_[1] + framed[3];
+    let bottom = box_[3];
+    quads.retain(|(_, p, ..)| p.iter().any(|v| v[1] < bottom - unit * 0.5));
     let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
     Some(Icon {
         // One texture pixel to one GUI pixel, whatever the model's own scale (a ghast, a villager), as Xaero draws.
@@ -5085,6 +5102,31 @@ fn draw_icon(batch: &mut HudBatch, icon: &Icon, at: [f32; 2], scale: f32, alpha:
     let frame = look::head_rect(at, icon.size, scale);
     batch.clip_since(start, frame[0] - pixel, frame[1] - pixel, frame[0] + frame[2] + pixel, frame[1] + frame[3] + pixel);
     frame
+}
+
+/// An entity's map icon from a resource pack or a mod (`look::icon_override_names`), drawn in
+/// the box of `side` at `at`: its silhouette in black one screen pixel out, then the image.
+/// None when no pack gives one.
+fn draw_override(game: &Game<'_>, batch: &mut HudBatch, names: &[String; 2], at: [f32; 2], side: f32, alpha: u32, shade: f32) -> Option<[f32; 4]> {
+    let pixel = 1. / batch.scale.max(1.);
+    let rect = look::head_rect(at, [side, side], 1.);
+    let level = (shade.clamp(0., 1.) * 255.).round() as u32;
+    let fill = (alpha << 24) | (level << 16) | (level << 8) | level;
+    for name in names {
+        let start = batch.vertices.len();
+        let offsets = look::outline_offsets(pixel);
+        let [dx, dy] = offsets[0];
+        batch.picture(&game.gui.atlas, name, rect[0] + dx, rect[1] + dy, rect[2], rect[3], alpha << 24);
+        if batch.vertices.len() == start {
+            continue;
+        }
+        for [dx, dy] in &offsets[1..] {
+            batch.picture(&game.gui.atlas, name, rect[0] + dx, rect[1] + dy, rect[2], rect[3], alpha << 24);
+        }
+        batch.picture(&game.gui.atlas, name, rect[0], rect[1], rect[2], rect[3], fill);
+        return Some(rect);
+    }
+    None
 }
 
 /// The merged face under the pointer on the world map: its tooltip and the face's rectangle.
@@ -5166,12 +5208,16 @@ fn draw_radar_faces(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f
         let [x,_,z] = position;
         let at = world_screen(view,rect,[x,z]);
         // A face whose box still reaches into the map is drawn, cut by the map's edge (Xaero).
-        let face = (dot.icon && dot.kind != "minecraft:item")
-            .then(|| mobs.get(&dot.entity_id).and_then(|mob| mob_icon(game, &dot.kind, mob))).flatten();
-        // Each face's side on screen with its outline.
+        let item = dot.group as usize == ::map::radar::ITEM;
+        let face = (dot.icon && !item).then(|| mobs.get(&dot.entity_id).map(|mob| {
+            let (_, texture) = horizon_client::mobs::render::body(mob);
+            let variant = texture.rsplit('/').next().unwrap_or(&texture).to_owned();
+            (look::icon_override_names(&dot.kind, &variant), mob_icon(game, &dot.kind, mob))
+        })).flatten();
+        // Each face's side on screen with its outline: every face in the one box.
         let side = match &face {
-            Some(icon) => icon.size[0].max(icon.size[1]) * scale * dot.icon_scale + 1.,
-            None if dot.icon && dot.kind == "minecraft:item" => look::ITEM_SIDE * scale + 1.,
+            Some(_) => look::ICON_BOX * scale * dot.icon_scale + 1.,
+            None if dot.icon && item => look::ITEM_SIDE * scale + 1.,
             None if dot.icon => 8. * scale * dot.icon_scale + 1.,
             None => dot.size + 2.,
         };
@@ -5183,7 +5229,7 @@ fn draw_radar_faces(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f
     // Faces of one mob kind that would overlap become one face with a stack count
     // (`look::group`); players, items, named mobs and dots stay single. Then kinds part.
     let keys: Vec<Option<u64>> = placed.iter().map(|(dot, ..)| {
-        (dot.icon && dot.label.is_none() && dot.kind != "minecraft:player" && dot.kind != "minecraft:item")
+        (dot.icon && dot.label.is_none() && dot.group as usize == ::map::radar::MOB)
             .then(|| dot.kind.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)))
     }).collect();
     let groups = look::group(&anchors, &sizes, &keys);
@@ -5202,8 +5248,9 @@ fn draw_radar_faces(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f
         // A face is cut by the map's edge, as Xaero's are.
         let start = batch.vertices.len();
         let head = match face {
-            Some(icon) => Some(draw_icon(batch, icon, [x, y], scale * dot.icon_scale, alpha, shade)),
-            None if dot.icon && dot.kind == "minecraft:item" => draw_item_head(game, batch, dot, [x, y], scale, alpha),
+            Some((names, icon)) => draw_override(game, batch, names, [x, y], look::ICON_BOX * scale * dot.icon_scale, alpha, shade)
+                .or_else(|| icon.as_ref().map(|icon| draw_icon(batch, icon, [x, y], look::icon_fit(icon.size, scale * dot.icon_scale), alpha, shade))),
+            None if dot.icon && dot.group as usize == ::map::radar::ITEM => draw_item_head(game, batch, dot, [x, y], scale, alpha),
             None => None,
         };
         if let Some(face) = head && group.members.len() > 1 {
