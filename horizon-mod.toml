@@ -1,6 +1,6 @@
 id = "map"
 name = "Map"
-version = "0.2.7"
+version = "0.2.8"
 description = "A minimap and a world map that remembers where you have been: waypoints, death points, entity radar, cave view and more."
 authors = ["ameliiom"]
 credits = "Adapted from trail by groznen95, itself based on Minimap, Worldmap and waypoints reworked by daniliammo and Gurov08ruS (GPL-3.0)."
