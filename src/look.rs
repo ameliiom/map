@@ -495,6 +495,12 @@ pub fn on_map(map: Rect, round: bool, point: Point) -> bool {
     !round || (point[0] - c[0]).hypot(point[1] - c[1]) <= map[2].min(map[3]) * 0.5
 }
 
+/// Whether a square of half side `half` centred on `point` still reaches into the map.
+pub fn reaches_map(map: Rect, round: bool, point: Point, half: f32) -> bool {
+    let grown = [map[0] - half, map[1] - half, map[2] + half * 2.0, map[3] + half * 2.0];
+    on_map(grown, round, point)
+}
+
 /// A waypoint's square on the minimap: at its point when inside the map, else clamped onto
 /// the frame on the line from the centre towards it, centred on the frame bands.
 pub fn waypoint_square(map: Rect, round: bool, point: Point) -> Rect {
@@ -625,6 +631,89 @@ pub fn declutter(anchors: &[Point], sizes: &[f32], reach: f32) -> Vec<Point> {
         }
     }
     at
+}
+
+/// Heads of one kind drawn as one: `members` index the input, `at` is their centre and
+/// `side` the largest head among them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub members: Vec<usize>,
+    pub at: Point,
+    pub side: f32,
+}
+
+/// Heads whose squares would overlap and share a `key` merged into one group at their
+/// centre, repeated until no two groups of one key overlap; a `None` key never merges.
+/// Every overlapping pair merges in the same round, so the sets do not depend on the input
+/// order; groups come in the order of their first member.
+pub fn group(anchors: &[Point], sizes: &[f32], keys: &[Option<u64>]) -> Vec<Group> {
+    fn find(root: &mut [usize], mut i: usize) -> usize {
+        while root[i] != i {
+            root[i] = root[root[i]];
+            i = root[i];
+        }
+        i
+    }
+    let mut groups: Vec<Group> = (0..anchors.len())
+        .map(|i| Group { members: vec![i], at: anchors[i], side: sizes[i] })
+        .collect();
+    loop {
+        let mut root: Vec<usize> = (0..groups.len()).collect();
+        let mut merged = false;
+        for a in 0..groups.len() {
+            let key = keys[groups[a].members[0]];
+            if key.is_none() {
+                continue;
+            }
+            for b in a + 1..groups.len() {
+                if key == keys[groups[b].members[0]]
+                    && shared_area(groups[a].at, groups[a].side, groups[b].at, groups[b].side) > 0.0
+                {
+                    let (ra, rb) = (find(&mut root, a), find(&mut root, b));
+                    if ra != rb {
+                        root[ra.max(rb)] = ra.min(rb);
+                        merged = true;
+                    }
+                }
+            }
+        }
+        if !merged {
+            return groups;
+        }
+        let mut next: Vec<Group> = Vec::new();
+        let mut slot = vec![usize::MAX; groups.len()];
+        for i in 0..groups.len() {
+            let r = find(&mut root, i);
+            if slot[r] == usize::MAX {
+                slot[r] = next.len();
+                next.push(Group { members: Vec::new(), at: [0.0, 0.0], side: 0.0 });
+            }
+            let target = &mut next[slot[r]];
+            target.members.extend_from_slice(&groups[i].members);
+            target.side = target.side.max(groups[i].side);
+        }
+        for g in &mut next {
+            g.members.sort_unstable();
+            let n = g.members.len() as f32;
+            let sum = g.members.iter().fold([0.0, 0.0], |s, &m| [s[0] + anchors[m][0], s[1] + anchors[m][1]]);
+            g.at = [sum[0] / n, sum[1] / n];
+        }
+        next.sort_by_key(|g| g.members[0]);
+        groups = next;
+    }
+}
+
+/// An inventory slot's stack count scaled onto a head: the text's top-left and its scale.
+/// Vanilla draws a 16-pixel item's count at scale 1 with its right edge 17 pixels and its top
+/// 9 pixels from the slot's corner; a head of another side scales all of it.
+pub fn stack_count(head: Rect, text_width: f32) -> (Point, f32) {
+    let s = head[3] / 16.0;
+    ([head[0] + (17.0 - text_width) * s, head[1] + 9.0 * s], s)
+}
+
+/// The shadow vanilla gives a text of this colour: each channel a quarter.
+pub const fn text_shadow(rgb: u32) -> u32 {
+    (rgb & 0xFC_FCFC) >> 2
 }
 
 /// The area two squares of these sides at these centres share.
@@ -1151,6 +1240,85 @@ mod tests {
         // Two heads that touch only a little part fully.
         let two = declutter(&[[0.0, 0.0], [6.0, 0.0]], &[8.0, 8.0], CROWD_REACH);
         assert!(crowd_overlap(&two, &[8.0, 8.0]) < 1e-3);
+    }
+
+    #[test]
+    fn crowds_of_one_kind_become_one_head_with_a_count() {
+        // Xaero's crowd: twelve pigs packed around a creeper, a lone pig, two unkeyed heads.
+        let mut anchors = Vec::new();
+        let mut keys = Vec::new();
+        for i in 0..12 {
+            anchors.push([100.0 + (i % 4) as f32 * 2.0 - 3.0, 100.0 + (i / 4) as f32 * 2.0 - 2.0]);
+            keys.push(Some(1));
+        }
+        anchors.push([100.0, 100.0]);
+        keys.push(Some(2));
+        anchors.push([60.0, 60.0]);
+        keys.push(Some(1));
+        anchors.push([100.0, 140.0]);
+        keys.push(None);
+        anchors.push([101.0, 141.0]);
+        keys.push(None);
+        let sizes = vec![8.0; anchors.len()];
+        let groups = group(&anchors, &sizes, &keys);
+        let counts: Vec<usize> = groups.iter().map(|g| g.members.len()).collect();
+        assert_eq!(counts, vec![12, 1, 1, 1, 1], "pigs merge; creeper, lone pig and unkeyed stay");
+        assert_eq!(groups[0].members, (0..12).collect::<Vec<_>>());
+        assert_eq!(groups[0].at, [100.0, 100.0], "anchored at the crowd's centre");
+        // No two groups of one key overlap after grouping.
+        for a in &groups {
+            for b in &groups {
+                if a != b && keys[a.members[0]].is_some() && keys[a.members[0]] == keys[b.members[0]] {
+                    assert_eq!(shared_area(a.at, a.side, b.at, b.side), 0.0);
+                }
+            }
+        }
+        // Stable: the same input gives the same groups, and a reversed input the same sets.
+        assert_eq!(group(&anchors, &sizes, &keys), groups);
+        let n = anchors.len() - 1;
+        let rev_anchors: Vec<Point> = anchors.iter().rev().copied().collect();
+        let rev_keys: Vec<Option<u64>> = keys.iter().rev().copied().collect();
+        let mut sets: Vec<Vec<usize>> = group(&rev_anchors, &sizes, &rev_keys)
+            .into_iter()
+            .map(|g| {
+                let mut m: Vec<usize> = g.members.iter().map(|i| n - i).collect();
+                m.sort();
+                m
+            })
+            .collect();
+        sets.sort();
+        let mut want: Vec<Vec<usize>> = groups.iter().map(|g| g.members.clone()).collect();
+        want.sort();
+        assert_eq!(sets, want);
+        // Zooming in spreads the same pigs apart: they split back into single heads.
+        let far: Vec<Point> = anchors.iter().map(|p| [p[0] * 6.0, p[1] * 6.0]).collect();
+        assert!(group(&far, &sizes, &keys).iter().all(|g| g.members.len() == 1));
+        // After grouping and parting nothing piles up.
+        let at: Vec<Point> = groups.iter().map(|g| g.at).collect();
+        let sides: Vec<f32> = groups.iter().map(|g| g.side).collect();
+        let parted = declutter(&at, &sides, CROWD_REACH);
+        let before = crowd_overlap(&anchors, &sizes);
+        let after = crowd_overlap(&parted, &sides);
+        eprintln!("grouped crowd overlap {before:.1} -> {after:.1} GUI px²");
+        assert!(after < 1e-3, "overlap left {after}");
+    }
+
+    #[test]
+    fn faces_at_the_edge_are_kept_to_be_cut() {
+        let map = [0.0, 0.0, 100.0, 100.0];
+        assert!(reaches_map(map, false, [103.0, 50.0], 4.0), "half outside: kept");
+        assert!(!reaches_map(map, false, [105.0, 50.0], 4.0), "wholly outside: dropped");
+        assert!(reaches_map(map, true, [50.0, 103.0], 4.0));
+        assert!(!reaches_map(map, true, [50.0, 105.0], 4.0));
+    }
+
+    #[test]
+    fn stack_count_sits_like_an_inventory_count() {
+        // A 16-pixel item: right edge at 17, top at 9, scale 1 (vanilla's slot).
+        assert_eq!(stack_count([0.0, 0.0, 16.0, 16.0], 11.0), ([6.0, 9.0], 1.0));
+        // An 8-pixel head: the same proportions at half size.
+        assert_eq!(stack_count([10.0, 20.0, 8.0, 8.0], 11.0), ([13.0, 24.5], 0.5));
+        assert_eq!(text_shadow(0xFF_FFFF), 0x3F_3F3F);
     }
 
     #[test]
