@@ -3662,25 +3662,52 @@ pub mod container {
     /// Owns exactly one descriptor; never clones it or lends it to readers.
     /// This primitive only opens existing files. Creation and physical deletion
     /// require the future directory/name coordinator and are deliberately absent.
+    ///
+    /// The lock is held on a sidecar (`<file>.lock`), not on the container: Windows locks are
+    /// mandatory and a whole-file lock on the container would stop every other handle from
+    /// reading it, the catalog's header reads included. The sidecar is never deleted, so two
+    /// owners can never hold locks on two different sidecars of one container.
     #[derive(Debug)]
     pub struct ContainerLease {
         file: File,
+        lock: File,
+    }
+
+    /// The sidecar a container's lease is locked on.
+    pub fn lock_path(path: &Path) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".lock");
+        name.into()
     }
 
     impl ContainerLease {
         /// Call on an I/O worker. No bytes are read or changed before ownership.
         /// Unsupported locking is an error, never permission to continue unlocked.
         pub fn open_existing(path: &Path) -> Result<Self, LeaseError> {
+            Self::open(path, false)
+        }
+
+        /// The lease on `path`, made empty first when `create` and it is missing.
+        pub fn open(path: &Path, create: bool) -> Result<Self, LeaseError> {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
+                .create(create)
+                .truncate(false)
                 .open(path)
                 .map_err(LeaseError::Io)?;
-            file.try_lock().map_err(|error| match error {
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(lock_path(path))
+                .map_err(LeaseError::Io)?;
+            lock.try_lock().map_err(|error| match error {
                 TryLockError::WouldBlock => LeaseError::Busy,
                 TryLockError::Error(error) => LeaseError::Io(error),
             })?;
-            Ok(Self { file })
+            Ok(Self { file, lock })
         }
 
         pub fn file_len(&self) -> io::Result<u64> {
@@ -3693,7 +3720,7 @@ pub mod container {
             // All I/O is synchronous under this owner and has finished now.
             // Explicit release also prevents a transient fork-before-exec copy
             // from extending the lease after the owning worker has stopped.
-            let _ = self.file.unlock();
+            let _ = self.lock.unlock();
         }
     }
 
@@ -4157,18 +4184,7 @@ pub mod container {
             migrate_legacy_cache(directory, world, &path);
             // No participant renames/unlinks these files. A create race converges
             // on one inode; initialization happens only after try_lock succeeds.
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .map_err(LeaseError::Io)?;
-            file.try_lock().map_err(|e| match e {
-                TryLockError::WouldBlock => LeaseError::Busy,
-                TryLockError::Error(e) => LeaseError::Io(e),
-            })?;
-            Self::from_lease(ContainerLease { file }, world)
+            Self::from_lease(ContainerLease::open(&path, true)?, world)
         }
         pub fn open_existing(path: &Path, world: &str) -> Result<Self, LeaseError> {
             if world.is_empty() || world.len() > 2048 {

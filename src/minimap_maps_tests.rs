@@ -754,7 +754,7 @@ macro_rules! define_tests {
                         .contains(&[-1, 0])
                 );
                 reopened.shutdown();
-                assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+                assert_eq!(std::fs::read_dir(&dir.0).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "mwwr")).count(), 1);
             }
             #[test]
             fn failed_writer_keeps_pending_data_and_service_stops_accepting_samples() {

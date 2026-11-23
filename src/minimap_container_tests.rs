@@ -269,7 +269,7 @@ macro_rules! define_tests {
                 }
                 let store = Store::open(&cache, "server:creation-race").unwrap();
                 assert_eq!(store.keys().count(), 0);
-                assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+                assert_eq!(std::fs::read_dir(&cache).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "mwwr")).count(), 1);
             }
             struct TestDir(std::path::PathBuf);
             impl TestDir {
@@ -349,7 +349,7 @@ macro_rules! define_tests {
                     store.commit().unwrap();
                 }
                 assert!(store.lease.file.metadata().unwrap().len() <= size + 8192);
-                assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
+                assert_eq!(std::fs::read_dir(&dir.0).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "mwwr")).count(), 2);
             }
             #[test]
             fn every_short_write_phase_keeps_an_old_root_and_poisoned_writer_stops() {
@@ -581,7 +581,10 @@ macro_rules! define_tests {
                     ContainerLease::open_existing(&dir.join("missing")),
                     Err(LeaseError::Io(_))
                 ));
-                assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+                // The two containers and their two lock sidecars; nothing for the missing one.
+                let names: std::collections::BTreeSet<_> = std::fs::read_dir(&dir).unwrap()
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+                assert_eq!(names, ["other.mwwr", "other.mwwr.lock", "world.mwwr", "world.mwwr.lock"].map(String::from).into());
                 std::fs::remove_dir_all(dir).unwrap();
             }
         }
