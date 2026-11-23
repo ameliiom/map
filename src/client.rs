@@ -4863,91 +4863,188 @@ fn radar_kind(dot: &::map::radar::Dot, mob: Option<&horizon_client::mobs::Mob>) 
     }
 }
 
-/// A face sprite with its one-screen-pixel black outline following the silhouette, then the
-/// face itself darkened by `shade`.
-fn outlined_sprite(game: &Game<'_>, batch: &mut HudBatch, texture: &str, sources: &[[f32; 4]], dst: [f32; 4], alpha: u32, shade: f32) -> bool {
-    let pixel = 1. / batch.scale.max(1.);
-    let outline = (alpha << 24) | (look::HEAD_OUTLINE & 0x00ff_ffff);
-    for [dx, dy] in look::outline_offsets(pixel) {
-        for src in sources {
-            if !game.native_sprite(batch, texture, *src, [dst[0] + dx, dst[1] + dy, dst[2], dst[3]], Some(outline)) {
-                return false;
+/// A dropped item's head: its item sprite, as a slot draws it.
+fn draw_item_head(game: &Game<'_>, batch: &mut HudBatch, dot: &::map::radar::Dot, at: [f32; 2], scale: f32, alpha: u32) -> Option<[f32; 4]> {
+    let item = game.dropped.iter().find(|item| item.id == dot.entity_id)?;
+    let side = look::ITEM_SIDE * scale;
+    let dst = look::head_rect(at, [side, side], 1.);
+    let start = batch.vertices.len();
+    let drawn = game.native_item_stack(batch, &item.stack, [dst[0], dst[1]], side);
+    set_opacity(batch, start, (alpha * 100 / 255) as u8);
+    drawn.then_some(dst)
+}
+
+/// An entity's head icon, made by the game's own entity drawing: the quads it would draw for
+/// the entity in a screen (its model or a mod's renderer, every render layer and every mod
+/// layer: eyes, wool, saddles, armour, collars, variants, baby or adult), seen from the front
+/// at one GUI pixel per model pixel, kept where the head is. Corners are relative to the
+/// head's centre, UVs in the GUI atlas, colours ABGR, far to near.
+struct Icon {
+    quads: Vec<([[f32; 2]; 4], [[f32; 2]; 4], u32)>,
+    size: [f32; 2],
+}
+
+/// Icons made so far, by what decides their look (`icon_key`), and how often they were used.
+static ICONS: Mutex<Option<std::collections::HashMap<String, Arc<Icon>>>> = Mutex::new(None);
+
+/// The most icons kept: every kind and variant on screen at once fits many times over.
+const ICONS_KEPT: usize = 256;
+
+/// What decides how an entity's head looks: its type, the textures and tints of its body and
+/// every layer the game would draw on it, its age, and a player's skin.
+fn icon_key(kind: &str, mob: &horizon_client::mobs::Mob) -> String {
+    use horizon_client::mobs::render;
+    let (model, texture) = render::body(mob);
+    let mut key = format!("{kind}|{model}|{texture}|{:08x}|{}|{}", render::body_color(mob, 1.), mob.is_baby(), mob.skin.as_deref().unwrap_or(""));
+    for layer in render::layers(mob, 0.) {
+        key.push_str(&format!("|{}:{}:{:08x}", layer.model, layer.texture, layer.color));
+    }
+    key
+}
+
+/// The part of `model` that is the head: the shallowest part whose name says head (`head`, a
+/// horse's `head_parts`), so everything attached to it comes with it. None for a model with
+/// no head (a slime): then the whole entity is its icon.
+fn head_part(model: &horizon_client::mobs::Part) -> Option<&str> {
+    let mut level = vec![model];
+    while !level.is_empty() {
+        if let Some(part) = level.iter().find(|part| part.name.contains("head")) {
+            return Some(part.name.as_str());
+        }
+        level = level.iter().flat_map(|part| part.children.iter()).collect();
+    }
+    None
+}
+
+/// The entity's head icon, made once per look and kept (`ICONS`).
+fn mob_icon(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> Option<Arc<Icon>> {
+    let key = icon_key(kind, mob);
+    let mut icons = ICONS.lock().unwrap_or_else(|error| error.into_inner());
+    let icons = icons.get_or_insert_with(Default::default);
+    if let Some(icon) = icons.get(&key) {
+        ICON_COST.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        runtime::profiling::record("radar-icon-hit", Duration::ZERO, 1, 0);
+        return Some(icon.clone());
+    }
+    let started = Instant::now();
+    let icon = make_icon(game, mob).map(Arc::new);
+    runtime::profiling::record("radar-icon-made", started.elapsed(), 1, 0);
+    log::debug!("[{}] head icon for {kind} made in {} us ({} kept, {} uses from the cache so far)",
+        runtime::MOD_ID, started.elapsed().as_micros(), icons.len() + 1, ICON_COST.hits.load(std::sync::atomic::Ordering::Relaxed));
+    if icons.len() >= ICONS_KEPT {
+        icons.clear();
+    }
+    if let Some(icon) = &icon {
+        icons.insert(key, icon.clone());
+    }
+    icon
+}
+
+/// Draws `mob` facing the viewer through the game's own entity drawing and keeps its head.
+fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
+    use glam::{DVec3, Mat4, Vec3};
+    use horizon_client::mobs::render;
+    // Posed as a screen poses an entity turned to face the viewer (`GuiEntityLook::Turned`).
+    let mut mob = mob.clone();
+    mob.previous = mob.position;
+    (mob.body_yaw, mob.previous_body_yaw, mob.head_yaw, mob.previous_head_yaw) = (180., 180., 180., 180.);
+    (mob.head_pitch, mob.previous_head_pitch) = (0., 0.);
+    mob.extra.model_scale = 0.;
+    // One GUI pixel per model pixel (16 a block), seen as a screen sees an entity.
+    let view = Mat4::from_scale(Vec3::new(16., 16., -16.))
+        * Mat4::from_translation(Vec3::new(0., mob.height() / 2., 0.))
+        * Mat4::from_rotation_z(std::f32::consts::PI);
+    let seen = |verts: &[horizon_client::mesher::Vertex]| -> Vec<(f32, [[f32; 3]; 4], [[f32; 2]; 4], u32)> {
+        verts.as_chunks::<4>().0.iter().filter_map(|q| {
+            let p: [Vec3; 4] = std::array::from_fn(|i| view.transform_point3(Vec3::from_array(q[i].pos)));
+            // The winding gives inward normals: a face with n.z >= 0 looks away.
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            if n.z >= 0. && horizon_client::mesher::culls_back(q[0].normal) {
+                return None;
             }
+            let depth = p.iter().map(|v| v.z).sum::<f32>() / 4.;
+            Some((depth, p.map(|v| v.to_array()), std::array::from_fn(|i| q[i].uv), q[0].color))
+        }).collect()
+    };
+    let at = DVec3::new(mob.position.x, mob.position.y, mob.position.z);
+    let atlas = &game.gui.atlas;
+    let lookup = |name: &str| atlas.sprites.get(name).map(|r| [r.u0, r.v0, r.u1, r.v1]);
+    let vanilla = |hidden: mod_api::HiddenParts| {
+        let mut out = Vec::new();
+        render::render_with_hidden(&mob, 1., at, &lookup, 240 | 240 << 8, game.res.mob_data(), &[], hidden, None, &mut out);
+        seen(&out)
+    };
+    // Where the head is: what the vanilla drawing loses when the head part is hidden.
+    let (model, _) = render::body(&mob);
+    let model = mob.kind.layer(&model).unwrap_or(&mob.kind.model);
+    let whole = vanilla(Default::default());
+    let head: Vec<_> = match head_part(model) {
+        Some(name) => {
+            let mut hidden = mod_api::HiddenParts::default();
+            hidden.hide_named(name).ok()?;
+            let rest: std::collections::HashSet<[u32; 3]> = vanilla(hidden).iter()
+                .map(|(_, p, ..)| [p[0][0].to_bits(), p[0][1].to_bits(), p[2][0].to_bits()]).collect();
+            whole.iter().filter(|(_, p, ..)| !rest.contains(&[p[0][0].to_bits(), p[0][1].to_bits(), p[2][0].to_bits()])).collect()
+        }
+        None => whole.iter().collect(),
+    };
+    let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for (_, p, ..) in &head {
+        for v in p {
+            bounds = [bounds[0].min(v[0]), bounds[1].min(v[1]), bounds[2].max(v[0]), bounds[3].max(v[1])];
         }
     }
-    let level = (shade.clamp(0., 1.) * 255.).round() as u32;
-    let tint = (alpha << 24) | (level << 16) | (level << 8) | level;
-    for src in sources {
-        game.native_sprite(batch, texture, *src, dst, Some(tint));
+    if !bounds.iter().all(|v| v.is_finite()) {
+        return None;
     }
-    true
+    // How deep the head goes (model pixels towards the viewer): what lies behind it, as a body
+    // seen past the head, is not the head.
+    let deep = head.iter().fold([f32::INFINITY, f32::NEG_INFINITY], |d, (z, ..)| [d[0].min(*z), d[1].max(*z)]);
+    // Everything the game draws for the entity (a mod's renderer and layers too) that lies on
+    // the head: its eyes, wool, hat, bridle; a layer may stand a pixel off it (wool).
+    let mut all = Vec::new();
+    game.gui_entity_geometry(&mob, &mut all);
+    let mut quads = seen(&all);
+    let margin = 1.;
+    let inside = |p: &[[f32; 3]; 4]| p.iter().all(|v| {
+        v[0] >= bounds[0] - margin && v[0] <= bounds[2] + margin && v[1] >= bounds[1] - margin && v[1] <= bounds[3] + margin
+    });
+    quads.retain(|(z, p, ..)| inside(p) && *z >= deep[0] - margin && *z <= deep[1] + margin);
+    quads.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut box_ = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for (_, p, ..) in &quads {
+        for v in p {
+            box_ = [box_[0].min(v[0]), box_[1].min(v[1]), box_[2].max(v[0]), box_[3].max(v[1])];
+        }
+    }
+    if quads.is_empty() {
+        return None;
+    }
+    let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
+    Some(Icon {
+        quads: quads.into_iter().map(|(_, p, uv, color)| (p.map(|v| [v[0] - centre[0], v[1] - centre[1]]), uv, color)).collect(),
+        size: [box_[2] - box_[0], box_[3] - box_[1]],
+    })
 }
 
-/// An entity's head at `at`: a player's skin face with its hat, an item's sprite, or the
-/// mob's own face from its texture, one texel per GUI pixel times `scale`.
-fn draw_head(game: &Game<'_>, batch: &mut HudBatch, mob: Option<&horizon_client::mobs::Mob>, dot: &::map::radar::Dot, at: [f32; 2], scale: f32, alpha: u32, shade: f32) -> Option<[f32; 4]> {
-    if dot.kind == "minecraft:player" {
-        let dst = look::head_rect(at, [8., 8.], scale);
-        let skin = mob.map(|mob| mob.skin.as_deref().unwrap_or(&mob.kind.texture)).unwrap_or("entity/player/wide/steve");
-        let layers = [[8., 8., 8., 8.], [40., 8., 8., 8.]];
-        return (outlined_sprite(game, batch, skin, &layers, dst, alpha, shade)
-            || outlined_sprite(game, batch, "entity/player/wide/steve", &layers, dst, alpha, shade)).then_some(dst);
+/// An icon at `at`: first its silhouette in black one screen pixel out on each side (the
+/// outline follows the drawn alpha), then the icon darkened by `shade`. Returns where it landed.
+fn draw_icon(batch: &mut HudBatch, icon: &Icon, at: [f32; 2], scale: f32, alpha: u32, shade: f32) -> [f32; 4] {
+    let pixel = 1. / batch.scale.max(1.);
+    let place = |p: &[[f32; 2]; 4], [dx, dy]: [f32; 2]| p.map(|v| [at[0] + v[0] * scale + dx, at[1] + v[1] * scale + dy, 0.]);
+    let outline = alpha << 24;
+    for offset in look::outline_offsets(pixel) {
+        for (p, uv, _) in &icon.quads {
+            batch.quad_3d(place(p, offset), *uv, outline);
+        }
     }
-    if dot.kind == "minecraft:item" {
-        let item = game.dropped.iter().find(|item| item.id == dot.entity_id)?;
-        let side = look::ITEM_SIDE * scale;
-        let dst = look::head_rect(at, [side, side], 1.);
-        let start = batch.vertices.len();
-        let drawn = game.native_item_stack(batch, &item.stack, [dst[0], dst[1]], side);
-        set_opacity(batch, start, (alpha * 100 / 255) as u8);
-        return drawn.then_some(dst);
+    let level = shade.clamp(0., 1.);
+    for (p, uv, color) in &icon.quads {
+        let channel = |s: u32| ((((color >> s) & 255) as f32 * level).round() as u32) << s;
+        let a = ((color >> 24) * alpha / 255) << 24;
+        batch.quad_3d(place(p, [0., 0.]), *uv, a | channel(16) | channel(8) | channel(0));
     }
-    let mob = mob?;
-    let (model_key, texture) = horizon_client::mobs::render::body(mob);
-    let model = mob.kind.layer(&model_key).unwrap_or(&mob.kind.model);
-    let sprite = game.gui.atlas.sprites.get(texture.as_ref())?;
-    let head = radar_head(model).unwrap_or(model);
-    // A head part may only group its cubes (the wolf's `head` holds `real_head`): then its
-    // face is the largest front face of the first level below that has one. Hats and other
-    // overlays under a head with its own faces are never taken.
-    let mut faces = Vec::new();
-    radar_faces(head, &mut faces);
-    let face = faces.into_iter().filter(|face| face.normal[2] < -0.5)
-        .max_by(|a,b| radar_uv_area(a).total_cmp(&radar_uv_area(b)))?;
-    let [u0,v0,u1,v1] = radar_uv(face);
-    if u0 >= u1 || v0 >= v1 || u0 < 0. || v0 < 0. || u1 > 1. || v1 > 1. { return None; }
-    let (width,height) = (sprite.w as f32,sprite.h as f32);
-    let src = [u0*width,v0*height,(u1-u0)*width,(v1-v0)*height];
-    // Textures drawn at a higher resolution than 64 texels keep the vanilla face size.
-    let texel = (64. / width.max(1.)).min(1.);
-    let dst = look::head_rect(at, [src[2] * texel, src[3] * texel], scale);
-    outlined_sprite(game, batch, texture.as_ref(), &[src], dst, alpha, shade).then_some(dst)
-}
-
-fn radar_head(part: &horizon_client::mobs::Part) -> Option<&horizon_client::mobs::Part> {
-    if part.name == "head" || part.name.ends_with("_head") { return Some(part); }
-    part.children.iter().find_map(radar_head)
-}
-
-fn radar_faces<'a>(part: &'a horizon_client::mobs::Part, out: &mut Vec<&'a horizon_client::mobs::Polygon>) {
-    if part.polygons.iter().any(|face| face.normal[2] < -0.5) {
-        out.extend(part.polygons.iter());
-        return;
-    }
-    for child in &part.children { radar_faces(child, out); }
-}
-
-fn radar_uv(face: &horizon_client::mobs::Polygon) -> [f32;4] {
-    let mut bounds = [f32::INFINITY,f32::INFINITY,f32::NEG_INFINITY,f32::NEG_INFINITY];
-    for [_,_,_,u,v] in face.vertices {
-        bounds = [bounds[0].min(u),bounds[1].min(v),bounds[2].max(u),bounds[3].max(v)];
-    }
-    bounds
-}
-
-fn radar_uv_area(face: &horizon_client::mobs::Polygon) -> f32 {
-    let [u0,v0,u1,v1] = radar_uv(face);
-    (u1-u0)*(v1-v0)
+    look::head_rect(at, icon.size, scale)
 }
 
 /// The merged face under the pointer on the world map: its tooltip and the face's rectangle.
@@ -4974,7 +5071,32 @@ fn group_lines<'a>(game: &Game<'_>, members: impl Iterator<Item = &'a ::map::rad
     lines
 }
 
+/// What the radar's faces cost: uses of a kept icon, and the time and count of radar draws
+/// (logged every 3000 draws).
+struct IconCost {
+    hits: std::sync::atomic::AtomicU64,
+    draws: std::sync::atomic::AtomicU64,
+    micros: std::sync::atomic::AtomicU64,
+}
+
+static ICON_COST: IconCost = IconCost {
+    hits: std::sync::atomic::AtomicU64::new(0),
+    draws: std::sync::atomic::AtomicU64::new(0),
+    micros: std::sync::atomic::AtomicU64::new(0),
+};
+
 fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], round: bool, after_frame: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let started = Instant::now();
+    draw_radar_faces(game, batch, view, rect, round, after_frame);
+    let micros = ICON_COST.micros.fetch_add(started.elapsed().as_micros() as u64, Relaxed) + started.elapsed().as_micros() as u64;
+    let draws = ICON_COST.draws.fetch_add(1, Relaxed) + 1;
+    if draws % 3000 == 0 {
+        log::debug!("[{}] radar draw: {} us on average over {draws} draws", runtime::MOD_ID, micros / draws);
+    }
+}
+
+fn draw_radar_faces(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4], round: bool, after_frame: bool) {
     let Some(radar) = ::map::radar::snapshot() else { return };
     if radar.dimension != view.dimension.id() || (view.large && !radar.world_map) { return; }
     let mobs: horizon_client::fast_hash::FxHashMap<_,_> = game.mobs.iter().map(|mob| (mob.id,mob)).collect();
@@ -5004,33 +5126,46 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
         let [x,_,z] = position;
         let at = world_screen(view,rect,[x,z]);
         // A face whose box still reaches into the map is drawn, cut by the map's edge (Xaero).
-        let half = if dot.icon { 4. * scale * dot.icon_scale } else { dot.size * 0.5 };
-        if !look::reaches_map(rect, round, at, half) { continue; }
-        placed.push((dot, at, shade));
+        let face = (dot.icon && dot.kind != "minecraft:item")
+            .then(|| mobs.get(&dot.entity_id).and_then(|mob| mob_icon(game, &dot.kind, mob))).flatten();
+        // Each face's side on screen with its outline.
+        let side = match &face {
+            Some(icon) => icon.size[0].max(icon.size[1]) * scale * dot.icon_scale + 1.,
+            None if dot.icon && dot.kind == "minecraft:item" => look::ITEM_SIDE * scale + 1.,
+            None if dot.icon => 8. * scale * dot.icon_scale + 1.,
+            None => dot.size + 2.,
+        };
+        if !look::reaches_map(rect, round, at, side * 0.5) { continue; }
+        placed.push((dot, at, shade, face, side));
     }
-    let anchors: Vec<[f32; 2]> = placed.iter().map(|(_, at, _)| *at).collect();
-    let sizes: Vec<f32> = placed.iter().map(|(dot, _, _)| if dot.icon { 8. * scale * dot.icon_scale + 1. } else { dot.size + 2. }).collect();
+    let anchors: Vec<[f32; 2]> = placed.iter().map(|(_, at, ..)| *at).collect();
+    let sizes: Vec<f32> = placed.iter().map(|(.., side)| *side).collect();
     // Faces of one mob kind that would overlap become one face with a stack count
     // (`look::group`); players, items, named mobs and dots stay single. Then kinds part.
-    let keys: Vec<Option<u64>> = placed.iter().map(|(dot, _, _)| {
+    let keys: Vec<Option<u64>> = placed.iter().map(|(dot, ..)| {
         (dot.icon && dot.label.is_none() && dot.kind != "minecraft:player" && dot.kind != "minecraft:item")
             .then(|| dot.kind.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)))
     }).collect();
     let groups = look::group(&anchors, &sizes, &keys);
     let centres: Vec<[f32; 2]> = groups.iter().map(|g| g.at).collect();
     let sides: Vec<f32> = groups.iter().map(|g| g.side).collect();
-    let parted = look::declutter(&centres, &sides, look::CROWD_REACH * scale);
+    let parted = look::declutter(&centres, &sides, look::CROWD_REACH * scale, look::CROWD_GAP);
     let mouse = view.large.then(|| game.cursor());
     let mut labels = Vec::new();
     let mut hover = None;
     for (group, [x, y]) in groups.iter().zip(parted) {
-        let (dot, _, _) = placed[group.members[0]];
+        let (dot, _, _, face, _) = &placed[group.members[0]];
+        let dot = *dot;
         // The group's face: its nearest member's, the least shaded.
         let shade = group.members.iter().map(|&m| placed[m].2).fold(0f32, f32::max);
         let alpha = group.members.iter().map(|&m| u32::from(placed[m].0.alpha)).max().unwrap_or(255);
-        let head = if dot.icon {
-            draw_head(game,batch,mobs.get(&dot.entity_id).copied(),dot,[x,y],scale*dot.icon_scale,alpha,shade)
-        } else { None };
+        // A face is cut by the map's edge, as Xaero's are.
+        let start = batch.vertices.len();
+        let head = match face {
+            Some(icon) => Some(draw_icon(batch, icon, [x, y], scale * dot.icon_scale, alpha, shade)),
+            None if dot.icon && dot.kind == "minecraft:item" => draw_item_head(game, batch, dot, [x, y], scale, alpha),
+            None => None,
+        };
         if let Some(face) = head && group.members.len() > 1 {
             let count = group.members.len().to_string();
             let (at, size) = look::stack_count(face, game.map_text_width(&count));
@@ -5039,6 +5174,7 @@ fn draw_radar(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]
                 hover = Some((group_lines(game, group.members.iter().map(|&m| placed[m].0)), face));
             }
         }
+        batch.clip_since(start, rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]);
         let shape = head.unwrap_or_else(|| {
             let half = dot.size*0.5;
             let level = (shade * 255.) as u32;
