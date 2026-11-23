@@ -5014,38 +5014,34 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
         }
         None => whole.iter().collect(),
     };
-    // The face, in model pixels (the model's own scale taken out, so a donkey and a horse are
-    // framed alike): what lies too far behind the face plate goes, a neck below it too.
+    // The face, in model pixels (the model's own scale taken out): everything of the head above
+    // its chin, a neck below it never (`look::face_frame`).
     let unit = model.pose[6].abs().max(0.01);
     let rect = |p: &[[f32; 3]; 4]| {
         let (x0, x1) = p.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v[0]), b.max(v[0])));
         let (y0, y1) = p.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), v| (a.min(v[1]), b.max(v[1])));
         [x0 / unit, y0 / unit, (x1 - x0) / unit, (y1 - y0) / unit]
     };
-    let Some((deepest, frame)) = look::face_frame(&head.iter().map(|(z, p, ..)| (*z / unit, rect(p))).collect::<Vec<_>>()) else {
+    let Some(frame) = look::face_frame(&head.iter().map(|(z, p, ..)| (*z / unit, rect(p))).collect::<Vec<_>>()) else {
         log::warn!("[{}] no head icon for {}: {} head faces of {} drawn, none a face plate", runtime::MOD_ID, mob.kind.id, head.len(), whole.len());
         return None;
     };
-    let frame = frame.map(|v| v * unit);
+    let chin = (frame[1] + frame[3]) * unit;
     // Everything the game draws for the entity (a mod's renderer and layers too) on that face:
     // its eyes, wool, hat, bridle; a layer may stand a pixel off it (wool).
     let mut all = Vec::new();
     game.gui_entity_geometry(&mob, &mut all);
     let mut quads = seen(&all);
     let margin = unit;
-    // The head's own box: the rest of the body (arms held up to the chin, a collar) is drawn
-    // only where it lies wholly on the head, as a sheep's wool does.
-    let own = head.iter().flat_map(|(_, p, ..)| p.iter()).fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
-        |b, v| [b[0].min(v[0]), b[1].min(v[1]), b[2].max(v[0]), b[3].max(v[1])]);
+    // The rest of the body counts only where it stands within the head's width and above the
+    // chin (wool, a mushroom on a mooshroom's head), never beside it (a sheep's body wool).
+    let own = head.iter().flat_map(|(_, p, ..)| p.iter()).fold([f32::INFINITY, f32::NEG_INFINITY],
+        |b, v| [b[0].min(v[0]), b[1].max(v[0])]);
     let on_head = |p: &[[f32; 3]; 4]| lost_keys.contains(&key(p)) || !rest.contains_key(&key(p))
-        || p.iter().all(|v| v[0] >= own[0] - margin && v[0] <= own[2] + margin && v[1] >= own[1] - margin && v[1] <= own[3] + margin);
-    let on_face = |z: f32, p: &[[f32; 3]; 4]| {
-        on_head(p)
-            && z >= deepest * unit - margin
-            && p.iter().all(|v| v[0] >= frame[0] - margin && v[0] <= frame[0] + frame[2] + margin && v[1] >= frame[1] - margin)
-            && p.iter().any(|v| v[1] < frame[1] + frame[3] - unit * 0.5)
-    };
-    quads.retain(|(z, p, ..)| on_face(*z, p));
+        || p.iter().all(|v| v[0] >= own[0] - margin && v[0] <= own[1] + margin && v[1] <= chin + margin);
+    // What starts above the chin stays; a neck or a body below it goes.
+    let on_face = |p: &[[f32; 3]; 4]| on_head(p) && p.iter().any(|v| v[1] < chin - unit * 0.5);
+    quads.retain(|(_, p, ..)| on_face(p));
     if quads.is_empty() {
         log::warn!("[{}] no head icon for {}: nothing drawn on its face", runtime::MOD_ID, mob.kind.id);
         return None;
@@ -5058,7 +5054,7 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
             box_ = [box_[0].min(v[0]), box_[1].min(v[1]), box_[2].max(v[0]), box_[3].max(v[1])];
         }
     }
-    box_[3] = box_[3].min(frame[1] + frame[3]);
+    box_[3] = box_[3].min(chin);
     let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
     Some(Icon {
         // One texture pixel to one GUI pixel, whatever the model's own scale (a ghast, a villager), as Xaero draws.

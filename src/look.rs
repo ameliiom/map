@@ -495,41 +495,47 @@ pub fn on_map(map: Rect, round: bool, point: Point) -> bool {
     !round || (point[0] - c[0]).hypot(point[1] - c[1]) <= map[2].min(map[3]) * 0.5
 }
 
-/// How far behind the face plate a head keeps its geometry, in model pixels: deep enough for
-/// horns, ears, gills, a witch's hat and a bogged's mushrooms, short of a horse's neck (its
-/// ears stand 8 behind the muzzle, its neck 8.6).
-pub const FACE_DEPTH: f32 = 8.3;
-
-/// A face plate is at least this share of the head's largest front face and two pixels high:
-/// a muzzle or snout counts, a hat brim's edge does not.
+/// A face plate is at least this share of the head's largest front face: a muzzle or a snout
+/// counts, a mole or a tusk's tip does not.
 pub const PLATE_SHARE: f32 = 0.1;
 
-/// A head is at most this many times as tall as it is wide below its top (a neck that is one
-/// piece with the head, as a llama's, is cut there), and always reaches two pixels below its
-/// face plate (a chin, a wattle).
-pub const FACE_ASPECT: f32 = 2.0;
-pub const CHIN: f32 = 2.0;
+/// A face plate is face-shaped: its short side at least this share of its long side, so a hat
+/// brim's front strip is no plate.
+pub const PLATE_SHAPE: f32 = 0.25;
 
-/// The face of a head from its front quads (depth in model pixels, larger nearer; rectangle in
-/// model pixels): the nearest depth that still belongs to it and the frame around it. The face
-/// plate is the nearest quad of a real size; what lies more than [`FACE_DEPTH`] behind it goes,
-/// and the frame stops [`FACE_ASPECT`] widths below the top, never above the plate's chin.
-pub fn face_frame(quads: &[(f32, Rect)]) -> Option<(f32, Rect)> {
+/// How far behind the face plate the rest of the face may sit, as a share of the plate's
+/// smaller side: a pig's face behind its snout belongs to the face, a llama's neck behind its
+/// muzzle does not.
+pub const FACE_REACH: f32 = 0.5;
+
+/// Where a head's face ends, from its front quads (depth in model pixels, larger nearer;
+/// rectangle in model pixels). The face plate is the nearest quad of a real size; the face is
+/// what lies within [`FACE_REACH`] of the plate's own size behind it, and its lowest edge is the
+/// chin. Everything of the head above the chin is the icon (ears, horns, hats, at any depth);
+/// nothing below it is (a neck, a body). Only proportions of the head itself decide.
+pub fn face_chin(quads: &[(f32, Rect)]) -> Option<f32> {
     let area = |r: &Rect| r[2] * r[3];
     let largest = quads.iter().map(|(_, r)| area(r)).fold(0.0, f32::max);
     let plate = quads
         .iter()
-        .filter(|(_, r)| area(r) >= largest * PLATE_SHARE && r[3] >= 2.0 && r[2] >= 2.0)
+        .filter(|(_, r)| area(r) >= largest * PLATE_SHARE && r[2].min(r[3]) >= r[2].max(r[3]) * PLATE_SHAPE)
         .max_by(|a, b| a.0.total_cmp(&b.0))?;
-    let deepest = plate.0 - FACE_DEPTH;
-    let kept: Vec<&Rect> = quads.iter().filter(|(d, _)| *d >= deepest).map(|(_, r)| r).collect();
-    let left = kept.iter().map(|r| r[0]).fold(f32::INFINITY, f32::min);
-    let right = kept.iter().map(|r| r[0] + r[2]).fold(f32::NEG_INFINITY, f32::max);
-    let top = kept.iter().map(|r| r[1]).fold(f32::INFINITY, f32::min);
-    let bottom = kept.iter().map(|r| r[1] + r[3]).fold(f32::NEG_INFINITY, f32::max);
-    let chin = plate.1[1] + plate.1[3] + CHIN;
-    let bottom = bottom.min((top + (right - left) * FACE_ASPECT).max(chin));
-    Some((deepest, [left, top, right - left, bottom - top]))
+    let reach = plate.1[2].min(plate.1[3]) * FACE_REACH;
+    quads
+        .iter()
+        .filter(|(depth, _)| *depth >= plate.0 - reach)
+        .map(|(_, r)| r[1] + r[3])
+        .reduce(f32::max)
+}
+
+/// The frame of a head's icon: every quad that starts above the chin, cut at the chin.
+pub fn face_frame(quads: &[(f32, Rect)]) -> Option<Rect> {
+    let chin = face_chin(quads)?;
+    let kept = quads.iter().filter(|(_, r)| r[1] < chin).map(|(_, r)| r);
+    let [left, top, right] = kept.fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY], |b, r| {
+        [b[0].min(r[0]), b[1].min(r[1]), b[2].max(r[0] + r[2])]
+    });
+    Some([left, top, right - left, chin - top])
 }
 
 /// Whether a square of half side `half` centred on `point` still reaches into the map.
@@ -1346,41 +1352,64 @@ mod tests {
         assert!(after < 1e-3, "overlap left {after}");
     }
 
-    /// A head's front quads from the model's own numbers: depth behind the frontmost surface
-    /// (made "larger is nearer"), x span and y span in model pixels.
-    fn head(quads: &[(f32, [f32; 2], [f32; 2])]) -> Vec<(f32, Rect)> {
-        quads.iter().map(|&(behind, [x0, x1], [y0, y1])| (-behind, [x0, y0, x1 - x0, y1 - y0])).collect()
+    /// A made-up head: a face plate `w` x `h`, a snout `snout` in front of it, ears of
+    /// `ear` px above it `ear_depth` behind, and a neck `neck` px long below it `neck_depth`
+    /// behind, in front quads (depth larger nearer, rectangle).
+    fn made_head(w: f32, h: f32, snout: f32, ear: f32, ear_depth: f32, neck: f32, neck_depth: f32) -> Vec<(f32, Rect)> {
+        let mut quads = vec![(0.0, [-w / 2.0, -h, w, h])];
+        if snout > 0.0 {
+            quads.push((snout, [-w / 4.0, -h / 2.0, w / 2.0, h / 2.0]));
+        }
+        if ear > 0.0 {
+            quads.push((-ear_depth, [-w / 2.0, -h - ear, w / 4.0, ear]));
+            quads.push((-ear_depth, [w / 4.0, -h - ear, w / 4.0, ear]));
+        }
+        if neck > 0.0 {
+            quads.push((-neck_depth, [-w / 3.0, -h / 2.0, w * 2.0 / 3.0, neck + h / 2.0]));
+        }
+        quads
     }
 
     #[test]
-    fn faces_keep_what_sticks_out_and_lose_necks() {
-        let kept = |q: &[(f32, Rect)], i: usize| q[i].0 >= face_frame(q).unwrap().0;
-        // Horse: muzzle in front, skull, ears 8 behind; the neck 8.6 behind and the mane go.
-        let horse = head(&[(0.0, [-2.0, 2.0], [-6.0, -2.0]), (0.9, [-2.0, 2.0], [-9.0, -6.0]), (4.3, [-3.0, 3.0], [-9.0, -4.0]),
-            (6.1, [-3.0, 3.0], [-12.0, -9.0]), (8.0, [-3.0, -1.0], [-13.0, -11.0]), (7.7, [1.0, 3.0], [-14.0, -13.0]),
-            (8.6, [-2.0, 2.0], [-4.0, 6.0]), (8.6, [-2.0, 2.0], [-8.0, -4.0]), (13.2, [-1.0, 1.0], [-12.0, 2.0])]);
-        let (_, frame) = face_frame(&horse).unwrap();
-        assert!((0..6).all(|i| kept(&horse, i)), "muzzle, skull and ears stay");
-        assert!(!kept(&horse, 6) && !kept(&horse, 7) && !kept(&horse, 8), "neck and mane go");
-        assert!(frame[1] + frame[3] <= 0.0 + 1e-3, "the frame ends at the muzzle's chin");
-        // Cow: horns 2 behind the face stay.
-        let cow = head(&[(1.0, [-4.0, 4.0], [-4.0, 4.0]), (0.0, [-3.0, 3.0], [1.0, 4.0]), (2.0, [-5.0, -4.0], [-5.0, -2.0]), (2.0, [4.0, 5.0], [-5.0, -2.0])]);
-        assert!((0..4).all(|i| kept(&cow, i)));
-        assert_eq!(face_frame(&cow).unwrap().1, [-5.0, -5.0, 10.0, 9.0]);
-        // Witch: the brim's edge in front is no plate; the tall hat behind the face stays whole.
-        let witch = head(&[(9.0, [-4.0, 4.0], [-10.0, 0.0]), (7.0, [-1.0, 1.0], [-3.0, 1.0]), (0.0, [-8.0, 8.0], [-16.0, -15.0]),
-            (8.0, [-5.0, 5.0], [-10.0, -8.0]), (9.9, [-3.5, 3.5], [-14.0, -10.0]), (11.9, [-2.0, 2.0], [-18.0, -14.0]), (13.9, [-1.0, 1.0], [-20.0, -17.0])]);
-        assert!((0..7).all(|i| kept(&witch, i)), "hat, brim and nose stay");
-        let (_, frame) = face_frame(&witch).unwrap();
-        assert!(frame[1] <= -20.0 && frame[1] + frame[3] >= 1.0, "hat tip to nose: {frame:?}");
-        // Llama: the face is one piece with the neck; the frame stops two widths below the ears.
-        let llama = head(&[(0.0, [-2.0, 2.0], [-14.0, -10.0]), (4.0, [-4.0, 4.0], [-16.0, 2.0]), (6.0, [-4.0, -1.0], [-19.0, -16.0]), (6.0, [1.0, 4.0], [-19.0, -16.0])]);
-        let (_, frame) = face_frame(&llama).unwrap();
-        assert_eq!(frame, [-4.0, -19.0, 8.0, 16.0]);
-        // Villager: nose, hat and the brim's edge stay, framed to the nose.
-        let villager = head(&[(4.0, [-4.0, 4.0], [-10.0, 0.0]), (2.0, [-1.0, 1.0], [-3.0, 1.0]), (3.5, [-4.5, 4.5], [-11.0, 1.0]), (0.0, [-8.0, 8.0], [-6.0, -5.0])]);
-        assert!((0..4).all(|i| kept(&villager, i)));
-        assert!(face_frame(&villager).unwrap().1[3] >= 12.0);
+    fn faces_keep_everything_above_the_chin_and_nothing_below() {
+        // Every head shape: faces 4 to 16 wide and tall, with or without a snout, ears up to
+        // 8 high at any depth, necks up to 20 long at any depth.
+        for w in [4.0_f32, 8.0, 16.0] {
+            for h in [4.0_f32, 8.0, 16.0] {
+                for snout in [0.0, 1.0, 3.0] {
+                    // The plate: the snout when there is one (a quarter of the face), else the
+                    // face itself; a neck sits deeper behind the face than the plate's reach.
+                    let plate: f32 = if snout > 0.0 { w.min(h) / 2.0 } else { w.min(h) };
+                    let reach = plate * FACE_REACH;
+                    for (ear, ear_depth) in [(0.0, 0.0), (3.0, 2.0), (8.0, 12.0)] {
+                        for (neck, neck_depth) in [(0.0, 0.0), (10.0, reach + 1.0), (20.0, reach * 3.0)] {
+                            let quads = made_head(w, h, snout, ear, ear_depth, neck, neck_depth);
+                            let frame = face_frame(&quads).unwrap();
+                            let chin = face_chin(&quads).unwrap();
+                            // The face plate and everything above the chin stay whole.
+                            assert!(frame[1] <= -h - ear + 1e-4, "ears and top kept: {frame:?}");
+                            assert!(frame[0] <= -w / 2.0 + 1e-4 && frame[0] + frame[2] >= w / 2.0 - 1e-4);
+                            assert!(chin >= 0.0 - 1e-4, "the chin is never above the face's bottom");
+                            // Nothing hangs below the face: a neck is cut at the chin.
+                            assert!((frame[1] + frame[3] - 0.0).abs() < 1e-4, "framed to the chin: {frame:?}");
+                            // So the icon is the face plus what stands above it, never a neck.
+                            assert!(frame[3] <= h + ear + 1e-4);
+                        }
+                    }
+                }
+            }
+        }
+        // A face that is one piece with its neck (a llama's): the muzzle is the plate, the
+        // long face behind it ends at the muzzle's chin.
+        let llama = vec![(0.0, [-2.0, -14.0, 4.0, 4.0]), (-4.0, [-4.0, -16.0, 8.0, 18.0]), (-6.0, [-4.0, -19.0, 3.0, 3.0]), (-6.0, [1.0, -19.0, 3.0, 3.0])];
+        let frame = face_frame(&llama).unwrap();
+        assert!(frame[3] <= frame[2] * 1.3, "compact: {frame:?}");
+        // A mole or a brim's front strip in front of a face is no plate: the face keeps its
+        // whole height down to its own chin.
+        let mole = vec![(0.0, [-0.5, -1.0, 1.0, 1.0]), (-1.0, [-4.0, -10.0, 8.0, 10.0]), (-3.0, [-3.0, -16.0, 6.0, 6.0])];
+        assert_eq!(face_frame(&mole).unwrap(), [-4.0, -16.0, 8.0, 16.0]);
+        let brim = vec![(0.0, [-8.0, -6.0, 16.0, 1.0]), (-4.0, [-4.0, -10.0, 8.0, 10.0]), (-2.0, [-1.0, -3.0, 2.0, 4.0])];
+        assert_eq!(face_chin(&brim).unwrap(), 1.0, "the chin is the nose's, below the face");
     }
 
     #[test]
