@@ -583,22 +583,26 @@ pub fn head_rect(at: Point, texels: [f32; 2], scale: f32) -> Rect {
     [at[0] - w * 0.5, at[1] - h * 0.5, w, h]
 }
 
-/// How far a head may move from its entity to clear a crowd: half a head, so it still
-/// touches its spot.
-pub const CROWD_REACH: f32 = 4.0;
+/// How far a head may move from its entity to clear a crowd: one head (at scale 1), so it
+/// stays beside its spot.
+pub const CROWD_REACH: f32 = 8.0;
 
-/// Heads that overlap pushed apart so each stays readable, every one at most `reach` from its
-/// anchor. `sizes` are the heads' sides. The same input gives the same result every frame.
-pub fn declutter(anchors: &[Point], sizes: &[f32], reach: f32) -> Vec<Point> {
+/// The space left between the outlines of two parted heads, in GUI pixels.
+pub const CROWD_GAP: f32 = 1.0;
+
+/// Heads that overlap pushed apart until `gap` lies between them, every one at most `reach`
+/// from its anchor. `sizes` are the heads' sides. The same input gives the same result every
+/// frame.
+pub fn declutter(anchors: &[Point], sizes: &[f32], reach: f32, gap: f32) -> Vec<Point> {
     let mut at = anchors.to_vec();
-    for _ in 0..16 {
+    for _ in 0..256 {
         let mut moved = false;
         for i in 0..at.len() {
             for j in i + 1..at.len() {
-                let need = (sizes[i] + sizes[j]) * 0.5;
+                let need = (sizes[i] + sizes[j]) * 0.5 + gap;
                 let (dx, dy) = (at[j][0] - at[i][0], at[j][1] - at[i][1]);
                 let (ox, oy) = (need - dx.abs(), need - dy.abs());
-                if ox <= 0.0 || oy <= 0.0 {
+                if ox <= 1e-4 || oy <= 1e-4 {
                     continue;
                 }
                 // Push along the axis that needs the least, both heads half each; heads on one
@@ -610,11 +614,11 @@ pub fn declutter(anchors: &[Point], sizes: &[f32], reach: f32) -> Vec<Point> {
                     (dx.signum(), dy.signum())
                 };
                 if ox < oy {
-                    at[i][0] -= sx * ox * 0.5;
-                    at[j][0] += sx * ox * 0.5;
+                    at[i][0] -= sx * (ox + 0.01) * 0.5;
+                    at[j][0] += sx * (ox + 0.01) * 0.5;
                 } else {
-                    at[i][1] -= sy * oy * 0.5;
-                    at[j][1] += sy * oy * 0.5;
+                    at[i][1] -= sy * (oy + 0.01) * 0.5;
+                    at[j][1] += sy * (oy + 0.01) * 0.5;
                 }
                 moved = true;
             }
@@ -703,12 +707,14 @@ pub fn group(anchors: &[Point], sizes: &[f32], keys: &[Option<u64>]) -> Vec<Grou
     }
 }
 
-/// An inventory slot's stack count scaled onto a head: the text's top-left and its scale.
-/// Vanilla draws a 16-pixel item's count at scale 1 with its right edge 17 pixels and its top
-/// 9 pixels from the slot's corner; a head of another side scales all of it.
+/// An inventory slot's stack count on a head: the text's top-left and its scale. Vanilla draws
+/// a 16-pixel item's count at the GUI font size with its right edge 1 pixel past the item's
+/// right and its top 7 pixels above the item's bottom. A bigger head scales it up; a smaller one
+/// keeps the font's own size, so the count is never smaller than an inventory's.
 pub fn stack_count(head: Rect, text_width: f32) -> (Point, f32) {
-    let s = head[3] / 16.0;
-    ([head[0] + (17.0 - text_width) * s, head[1] + 9.0 * s], s)
+    let s = (head[3] / 16.0).max(1.0);
+    let (right, bottom) = (head[0] + head[2], head[1] + head[3]);
+    ([right + s - text_width * s, bottom - 7.0 * s], s)
 }
 
 /// The shadow vanilla gives a text of this colour: each channel a quarter.
@@ -1227,7 +1233,7 @@ mod tests {
         }
         anchors.push([160.0, 160.0]);
         let sizes = vec![8.0; anchors.len()];
-        let parted = declutter(&anchors, &sizes, CROWD_REACH);
+        let parted = declutter(&anchors, &sizes, CROWD_REACH, CROWD_GAP);
         let before = crowd_overlap(&anchors, &sizes);
         let after = crowd_overlap(&parted, &sizes);
         eprintln!("crowd overlap {before:.1} -> {after:.1} GUI px²");
@@ -1236,9 +1242,9 @@ mod tests {
             assert!((p[0] - a[0]).hypot(p[1] - a[1]) <= CROWD_REACH + 1e-3);
         }
         assert_eq!(parted.last(), anchors.last(), "a lone head does not move");
-        assert_eq!(declutter(&anchors, &sizes, CROWD_REACH), parted, "the same every frame");
+        assert_eq!(declutter(&anchors, &sizes, CROWD_REACH, CROWD_GAP), parted, "the same every frame");
         // Two heads that touch only a little part fully.
-        let two = declutter(&[[0.0, 0.0], [6.0, 0.0]], &[8.0, 8.0], CROWD_REACH);
+        let two = declutter(&[[0.0, 0.0], [6.0, 0.0]], &[8.0, 8.0], CROWD_REACH, CROWD_GAP);
         assert!(crowd_overlap(&two, &[8.0, 8.0]) < 1e-3);
     }
 
@@ -1296,7 +1302,7 @@ mod tests {
         // After grouping and parting nothing piles up.
         let at: Vec<Point> = groups.iter().map(|g| g.at).collect();
         let sides: Vec<f32> = groups.iter().map(|g| g.side).collect();
-        let parted = declutter(&at, &sides, CROWD_REACH);
+        let parted = declutter(&at, &sides, CROWD_REACH, CROWD_GAP);
         let before = crowd_overlap(&anchors, &sizes);
         let after = crowd_overlap(&parted, &sides);
         eprintln!("grouped crowd overlap {before:.1} -> {after:.1} GUI px²");
@@ -1313,11 +1319,36 @@ mod tests {
     }
 
     #[test]
+    fn a_pile_of_kinds_parts_with_a_gap_and_stays_near() {
+        // Xaero's 03m pile at zoom 6 (3 GUI px per block): zombie, skeleton, pig, cow, creeper,
+        // chicken within two blocks, heads 9 px with their outline.
+        let blocks = [[-15.0, -9.0], [-16.0, -10.0], [-16.0, -8.0], [-14.0, -10.0], [-15.3, -9.7], [-13.0, -8.0]];
+        let anchors: Vec<Point> = blocks.iter().map(|b| [100.0 + b[0] * 3.0, 100.0 + b[1] * 3.0]).collect();
+        let sizes = vec![9.0; anchors.len()];
+        let parted = declutter(&anchors, &sizes, CROWD_REACH, CROWD_GAP);
+        for i in 0..parted.len() {
+            let moved = (parted[i][0] - anchors[i][0]).hypot(parted[i][1] - anchors[i][1]);
+            assert!(moved <= CROWD_REACH + 1e-3, "head {i} moved {moved}");
+            for j in i + 1..parted.len() {
+                let need = (sizes[i] + sizes[j]) * 0.5;
+                let gap = ((parted[j][0] - parted[i][0]).abs() - need).max((parted[j][1] - parted[i][1]).abs() - need);
+                assert!(gap >= CROWD_GAP - 1e-3, "heads {i} and {j} {gap} px apart");
+            }
+        }
+    }
+
+    #[test]
     fn stack_count_sits_like_an_inventory_count() {
         // A 16-pixel item: right edge at 17, top at 9, scale 1 (vanilla's slot).
         assert_eq!(stack_count([0.0, 0.0, 16.0, 16.0], 11.0), ([6.0, 9.0], 1.0));
-        // An 8-pixel head: the same proportions at half size.
-        assert_eq!(stack_count([10.0, 20.0, 8.0, 8.0], 11.0), ([13.0, 24.5], 0.5));
+        // Every head size, every zoom: never below the font's own size, always at the corner.
+        for side in [2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0] {
+            let head = [10.0, 20.0, side, side];
+            let (at, s) = stack_count(head, 11.0);
+            assert!(s >= 1.0, "count legible on a {side} px head");
+            assert!((at[0] + 11.0 * s - (head[0] + side + s)).abs() < 1e-4, "right edge 1 px past");
+            assert!((at[1] + 7.0 * s - (head[1] + side)).abs() < 1e-4, "glyph bottom on the corner");
+        }
         assert_eq!(text_shadow(0xFF_FFFF), 0x3F_3F3F);
     }
 
