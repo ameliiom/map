@@ -656,32 +656,21 @@ pub fn opaque_span(cells: [usize; 2], opaque: impl Fn(usize, usize) -> bool) -> 
     Some([a as f32 / n, b as f32 / m, (c + 1) as f32 / n, (d + 1) as f32 / m])
 }
 
-/// A wide icon's short side is at least this share of the box: wider ones are framed on the
-/// middle of their face, so every icon reads at the same weight.
+/// Every icon's short side is at least this share of the box, so every icon reads at the same
+/// weight, whatever its source.
 pub const MIN_SHORT_SIDE: f32 = 0.75;
 
-/// The part of an icon's opaque `bounds` that fills the box: a wide icon keeps its middle, as
-/// wide as its height allows at [`MIN_SHORT_SIDE`]; any other stays whole.
+/// The part of an icon's opaque `bounds` that fills the box, one rule for every icon (a
+/// generated face, a body drawn whole, an image from a pack): a wide one keeps its middle, a
+/// tall one its top (the upper face with its ears, a squid's or a ghast's head rather than its
+/// tentacles), each as long as the short side allows at [`MIN_SHORT_SIDE`].
 pub fn icon_crop(bounds: Rect) -> Rect {
     let [x, y, w, h] = bounds;
-    let widest = h / MIN_SHORT_SIDE;
+    let (widest, tallest) = (h / MIN_SHORT_SIDE, w / MIN_SHORT_SIDE);
     if w > widest {
         [x + (w - widest) / 2.0, y, widest, h]
-    } else {
-        bounds
-    }
-}
-
-/// An icon is far from square when one side is more than this many times the other.
-pub const FAR_FROM_SQUARE: f32 = 2.5;
-
-/// The part of an icon's front view `bounds` that is its face. A body drawn whole (a model
-/// with no head part: a squid, a ghast) or a head far taller than wide is framed on its top
-/// square, width by width from the top; anything else stays whole.
-pub fn icon_frame(bounds: Rect, whole: bool) -> Rect {
-    let [x, y, w, h] = bounds;
-    if (whole && h > w) || h > w * FAR_FROM_SQUARE {
-        [x, y, w, w]
+    } else if h > tallest {
+        [x, y, w, tallest]
     } else {
         bounds
     }
@@ -1486,20 +1475,26 @@ mod tests {
         assert_eq!(opaque_span([8, 8], |_, _| false), None);
         assert_eq!(opaque_span([8, 8], |_, _| true), Some([0.0, 0.0, 1.0, 1.0]));
         assert_eq!(opaque_span([8, 4], |i, j| (2..6).contains(&i) && j == 1), Some([0.25, 0.25, 0.75, 0.5]));
-        // Every icon, trimmed and fitted: its longer side touches the box, nothing passes it,
-        // and a wide one keeps at least MIN_SHORT_SIDE of the box on its short side.
-        for w in [1.0_f32, 2.0, 5.0, 8.0, 14.0, 22.5, 48.0] {
-            for h in [1.0_f32, 2.9, 5.0, 8.0, 18.4, 25.0] {
-                let crop = icon_crop([-w / 2.0, -h, w, h]);
-                let fit = icon_fit([crop[2], crop[3]], 1.0);
-                let [fw, fh] = [crop[2] * fit, crop[3] * fit];
-                assert!((fw.max(fh) - ICON_BOX).abs() < 1e-3, "{w}x{h}: {fw}x{fh}");
-                assert!(fw <= ICON_BOX + 1e-3 && fh <= ICON_BOX + 1e-3);
-                if w >= h {
-                    assert!(fh >= ICON_BOX * MIN_SHORT_SIDE - 1e-3, "{w}x{h} is not flat: {fw}x{fh}");
-                }
-                assert!(crop[2] <= w + 1e-6 && crop[3] == h, "a crop only narrows");
-            }
+        // Every icon, flat, wide, square, tall or a whole body, trimmed and fitted: its longer
+        // side touches the box, nothing passes it, both sides keep MIN_SHORT_SIDE of the box,
+        // a wide one keeps its middle and a tall one its top.
+        let shapes = [
+            [1.0_f32, 1.0], [8.0, 8.0], [10.0, 9.0], // square-ish faces
+            [48.0, 25.0], [22.5, 18.4], [14.0, 2.9], [16.0, 1.0], // wide faces, a flat body
+            [6.0, 12.1], [4.0, 6.0], [18.0, 20.8], [8.0, 14.0], // tall faces
+            [12.0, 30.0], [16.0, 26.0], [2.0, 25.0], // whole bodies: squid, ghast, a pole
+        ];
+        for [w, h] in shapes {
+            let bounds = [-w / 2.0, -h, w, h];
+            let crop = icon_crop(bounds);
+            let fit = icon_fit([crop[2], crop[3]], 1.0);
+            let [fw, fh] = [crop[2] * fit, crop[3] * fit];
+            assert!((fw.max(fh) - ICON_BOX).abs() < 1e-3, "{w}x{h}: {fw}x{fh}");
+            assert!(fw <= ICON_BOX + 1e-3 && fh <= ICON_BOX + 1e-3);
+            assert!(fw.min(fh) >= ICON_BOX * MIN_SHORT_SIDE - 1e-3, "{w}x{h} is a bar: {fw}x{fh}");
+            assert!(crop[2] <= w + 1e-6 && crop[3] <= h + 1e-6, "a crop only takes away");
+            assert_eq!(crop[1], bounds[1], "the top always stays");
+            assert!((crop[0] + crop[2] / 2.0 - 0.0).abs() < 1e-4, "centred across");
         }
     }
 
@@ -1514,8 +1509,8 @@ mod tests {
     }
 
     #[test]
-    fn every_icon_fits_one_box_and_is_a_face() {
-        // Any size, tiny to giant, wide or tall: its longer side becomes the box.
+    fn every_icon_fits_one_box() {
+        // Any size, tiny to giant, wide or tall, at any scale: its longer side becomes the box.
         for w in [1.0_f32, 2.0, 4.0, 8.0, 16.0, 48.0, 64.0] {
             for h in [1.0_f32, 3.0, 8.0, 25.0, 64.0] {
                 for scale in [0.5_f32, 1.0, 2.0] {
@@ -1523,21 +1518,6 @@ mod tests {
                     let longer = w.max(h) * fit;
                     assert!((longer - ICON_BOX * scale).abs() < 1e-3, "{w}x{h} at {scale}: {longer}");
                     assert!(w * fit <= ICON_BOX * scale + 1e-3 && h * fit <= ICON_BOX * scale + 1e-3);
-                }
-                // A whole body taller than wide keeps its top square; a head far from square
-                // too; everything else stays as it is.
-                let bounds = [-w / 2.0, -h, w, h];
-                for whole in [false, true] {
-                    let frame = icon_frame(bounds, whole);
-                    assert_eq!(frame[0..3], bounds[0..3], "same top, same width");
-                    assert!(frame[3] <= h + 1e-6);
-                    if whole && h > w || h > w * FAR_FROM_SQUARE {
-                        assert_eq!(frame[3], w, "the top square");
-                    } else {
-                        assert_eq!(frame, bounds);
-                    }
-                    // After framing, no icon is far from square in height.
-                    assert!(frame[3] <= frame[2] * FAR_FROM_SQUARE + 1e-4);
                 }
             }
         }

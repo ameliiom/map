@@ -4995,7 +4995,6 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
     // hidden head loses is counted, not just looked up.
     let mut rest: std::collections::HashMap<[u32; 3], usize> = Default::default();
     let mut lost_keys: std::collections::HashSet<[u32; 3]> = Default::default();
-    let mut whole_body = false;
     let head: Vec<_> = match head_part(model) {
         Some(name) => {
             let mut hidden = mod_api::HiddenParts::default();
@@ -5016,16 +5015,12 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
             // as for a mob without a head part.
             if lost.is_empty() {
                 rest.clear();
-                whole_body = true;
                 whole.iter().collect()
             } else {
                 lost
             }
         }
-        None => {
-            whole_body = true;
-            whole.iter().collect()
-        }
+        None => whole.iter().collect(),
     };
     // The face, in model pixels (the model's own scale taken out): everything of the head above
     // its chin, a neck below it never (`look::face_frame`).
@@ -5068,9 +5063,6 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
         }
     }
     box_[3] = box_[3].min(chin);
-    // A body drawn whole (a squid, a ghast) or a head far from square keeps its top square.
-    let framed = look::icon_frame([box_[0], box_[1], box_[2] - box_[0], box_[3] - box_[1]], whole_body);
-    box_[3] = box_[1] + framed[3];
     let bottom = box_[3];
     quads.retain(|(_, p, ..)| p.iter().any(|v| v[1] < bottom - unit * 0.5));
     // Trimmed to what shows: the opaque texels of every face, inside the frame (a bee's empty
@@ -5080,7 +5072,8 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
     if let Some(o) = opaque {
         box_ = o;
     }
-    // A wide face keeps its middle, so it fills the box as a square one does.
+    // One crop for every icon: a wide one keeps its middle, a tall one or a whole body its top,
+    // so every icon fills the box at the same weight (`look::icon_crop`).
     let crop = look::icon_crop([box_[0], box_[1], box_[2] - box_[0], box_[3] - box_[1]]);
     box_ = [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]];
     let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
