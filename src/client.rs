@@ -4930,6 +4930,7 @@ fn mob_icon(game: &Game<'_>, kind: &str, mob: &horizon_client::mobs::Mob) -> Opt
     let mut icons = ICONS.lock().unwrap_or_else(|error| error.into_inner());
     let icons = icons.get_or_insert_with(Default::default);
     if let Some(icon) = icons.get(&key) {
+        release_atlas_pixels();
         ICON_COST.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         runtime::profiling::record("radar-icon-hit", Duration::ZERO, 1, 0);
         return icon.clone();
@@ -5072,12 +5073,86 @@ fn make_icon(game: &Game<'_>, mob: &horizon_client::mobs::Mob) -> Option<Icon> {
     box_[3] = box_[1] + framed[3];
     let bottom = box_[3];
     quads.retain(|(_, p, ..)| p.iter().any(|v| v[1] < bottom - unit * 0.5));
+    // Trimmed to what shows: the opaque texels of every face, inside the frame (a bee's empty
+    // wing planes, a model's transparent margins do not count).
+    let opaque = opaque_bounds(game, &quads).map(|o| [o[0].max(box_[0]), o[1].max(box_[1]), o[2].min(box_[2]), o[3].min(box_[3])])
+        .filter(|o| o[2] > o[0] && o[3] > o[1]);
+    if let Some(o) = opaque {
+        box_ = o;
+    }
+    // A wide face keeps its middle, so it fills the box as a square one does.
+    let crop = look::icon_crop([box_[0], box_[1], box_[2] - box_[0], box_[3] - box_[1]]);
+    box_ = [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]];
     let centre = [(box_[0] + box_[2]) * 0.5, (box_[1] + box_[3]) * 0.5];
     Some(Icon {
         // One texture pixel to one GUI pixel, whatever the model's own scale (a ghast, a villager), as Xaero draws.
         quads: quads.into_iter().map(|(_, p, uv, color)| (p.map(|v| [(v[0] - centre[0]) / unit, (v[1] - centre[1]) / unit]), uv, color)).collect(),
         size: [(box_[2] - box_[0]) / unit, (box_[3] - box_[1]) / unit],
     })
+}
+
+/// The GUI atlas's pixels while icons are being made: unpacked once, kept a few seconds, so a
+/// burst of new looks unpacks them once (`opaque_bounds`).
+static ATLAS_PIXELS: Mutex<Option<(String, Arc<Vec<u8>>, Instant)>> = Mutex::new(None);
+
+/// The bounds `[x0, y0, x1, y1]` of what the quads show: each face's opaque texels mapped back
+/// onto it. None when nothing is opaque.
+fn opaque_bounds(game: &Game<'_>, quads: &[(f32, [[f32; 3]; 4], [[f32; 2]; 4], u32)]) -> Option<[f32; 4]> {
+    let atlas = &game.gui.atlas;
+    let stamp = format!("{}x{} {}", atlas.width, atlas.height, atlas.sprites.len());
+    let pixels = {
+        let mut kept = ATLAS_PIXELS.lock().unwrap_or_else(|error| error.into_inner());
+        match kept.as_mut().filter(|(at, ..)| *at == stamp) {
+            Some((_, pixels, used)) => {
+                *used = Instant::now();
+                pixels.clone()
+            }
+            None => {
+                let pixels = Arc::new(atlas.pixels().into_owned());
+                *kept = Some((stamp, pixels.clone(), Instant::now()));
+                pixels
+            }
+        }
+    };
+    let [w, h] = [atlas.width as usize, atlas.height as usize];
+    if pixels.len() < w * h * 4 {
+        return None;
+    }
+    let alpha = |uv: [f32; 2]| {
+        let x = ((uv[0] * w as f32) as usize).min(w.saturating_sub(1));
+        let y = ((uv[1] * h as f32) as usize).min(h.saturating_sub(1));
+        pixels[(y * w + x) * 4 + 3] > 25
+    };
+    let mut bounds: Option<[f32; 4]> = None;
+    for (_, p, uv, color) in quads {
+        if color >> 24 == 0 {
+            continue;
+        }
+        let texels = |a: [f32; 2], b: [f32; 2]| (((b[0] - a[0]) * w as f32).hypot((b[1] - a[1]) * h as f32).round() as usize).clamp(1, 64);
+        let cells = [texels(uv[0], uv[1]), texels(uv[0], uv[3])];
+        let at = |s: f32, t: f32| [uv[0][0] + (uv[1][0] - uv[0][0]) * s + (uv[3][0] - uv[0][0]) * t,
+            uv[0][1] + (uv[1][1] - uv[0][1]) * s + (uv[3][1] - uv[0][1]) * t];
+        let Some([s0, t0, s1, t1]) = look::opaque_span(cells, |i, j| {
+            alpha(at((i as f32 + 0.5) / cells[0] as f32, (j as f32 + 0.5) / cells[1] as f32))
+        }) else { continue };
+        let place = |s: f32, t: f32| [p[0][0] + (p[1][0] - p[0][0]) * s + (p[3][0] - p[0][0]) * t,
+            p[0][1] + (p[1][1] - p[0][1]) * s + (p[3][1] - p[0][1]) * t];
+        for [x, y] in [place(s0, t0), place(s1, t0), place(s0, t1), place(s1, t1)] {
+            bounds = Some(match bounds {
+                None => [x, y, x, y],
+                Some(b) => [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)],
+            });
+        }
+    }
+    bounds
+}
+
+/// Lets go of the atlas's unpacked pixels once no icon has been made for a few seconds.
+fn release_atlas_pixels() {
+    let mut kept = ATLAS_PIXELS.lock().unwrap_or_else(|error| error.into_inner());
+    if kept.as_ref().is_some_and(|(_, _, used)| used.elapsed() > Duration::from_secs(5)) {
+        *kept = None;
+    }
 }
 
 /// An icon at `at`: first its silhouette in black one screen pixel out on each side (the

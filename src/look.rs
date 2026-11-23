@@ -636,6 +636,42 @@ pub fn icon_fit(size: [f32; 2], scale: f32) -> f32 {
     ICON_BOX * scale / size[0].max(size[1]).max(0.01)
 }
 
+/// The share of a face's texels, along each of its two edges, that carry something: the span
+/// `[s0, t0, s1, t1]` (0 to 1) of the cells where `opaque(i, j)` holds on a grid of `cells`, or
+/// None when none does. An icon is trimmed to what can be seen, not to its geometry.
+pub fn opaque_span(cells: [usize; 2], opaque: impl Fn(usize, usize) -> bool) -> Option<[f32; 4]> {
+    let mut span: Option<[usize; 4]> = None;
+    for j in 0..cells[1] {
+        for i in 0..cells[0] {
+            if opaque(i, j) {
+                span = Some(match span {
+                    None => [i, j, i, j],
+                    Some([a, b, c, d]) => [a.min(i), b.min(j), c.max(i), d.max(j)],
+                });
+            }
+        }
+    }
+    let [a, b, c, d] = span?;
+    let [n, m] = [cells[0] as f32, cells[1] as f32];
+    Some([a as f32 / n, b as f32 / m, (c + 1) as f32 / n, (d + 1) as f32 / m])
+}
+
+/// A wide icon's short side is at least this share of the box: wider ones are framed on the
+/// middle of their face, so every icon reads at the same weight.
+pub const MIN_SHORT_SIDE: f32 = 0.75;
+
+/// The part of an icon's opaque `bounds` that fills the box: a wide icon keeps its middle, as
+/// wide as its height allows at [`MIN_SHORT_SIDE`]; any other stays whole.
+pub fn icon_crop(bounds: Rect) -> Rect {
+    let [x, y, w, h] = bounds;
+    let widest = h / MIN_SHORT_SIDE;
+    if w > widest {
+        [x + (w - widest) / 2.0, y, widest, h]
+    } else {
+        bounds
+    }
+}
+
 /// An icon is far from square when one side is more than this many times the other.
 pub const FAR_FROM_SQUARE: f32 = 2.5;
 
@@ -1442,6 +1478,29 @@ mod tests {
         assert_eq!(face_frame(&mole).unwrap(), [-4.0, -16.0, 8.0, 16.0]);
         let brim = vec![(0.0, [-8.0, -6.0, 16.0, 1.0]), (-4.0, [-4.0, -10.0, 8.0, 10.0]), (-2.0, [-1.0, -3.0, 2.0, 4.0])];
         assert_eq!(face_chin(&brim).unwrap(), 1.0, "the chin is the nose's, below the face");
+    }
+
+    #[test]
+    fn icons_are_trimmed_to_what_shows_and_fill_the_box() {
+        // The opaque cells of a grid, wherever they are.
+        assert_eq!(opaque_span([8, 8], |_, _| false), None);
+        assert_eq!(opaque_span([8, 8], |_, _| true), Some([0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(opaque_span([8, 4], |i, j| (2..6).contains(&i) && j == 1), Some([0.25, 0.25, 0.75, 0.5]));
+        // Every icon, trimmed and fitted: its longer side touches the box, nothing passes it,
+        // and a wide one keeps at least MIN_SHORT_SIDE of the box on its short side.
+        for w in [1.0_f32, 2.0, 5.0, 8.0, 14.0, 22.5, 48.0] {
+            for h in [1.0_f32, 2.9, 5.0, 8.0, 18.4, 25.0] {
+                let crop = icon_crop([-w / 2.0, -h, w, h]);
+                let fit = icon_fit([crop[2], crop[3]], 1.0);
+                let [fw, fh] = [crop[2] * fit, crop[3] * fit];
+                assert!((fw.max(fh) - ICON_BOX).abs() < 1e-3, "{w}x{h}: {fw}x{fh}");
+                assert!(fw <= ICON_BOX + 1e-3 && fh <= ICON_BOX + 1e-3);
+                if w >= h {
+                    assert!(fh >= ICON_BOX * MIN_SHORT_SIDE - 1e-3, "{w}x{h} is not flat: {fw}x{fh}");
+                }
+                assert!(crop[2] <= w + 1e-6 && crop[3] == h, "a crop only narrows");
+            }
+        }
     }
 
     #[test]
