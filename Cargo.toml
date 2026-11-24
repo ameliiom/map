@@ -11,4 +11,3 @@ license = "GPL-3.0-only"
 # pinned with `horizon-launcher native-lock .` before building.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 
-[workspace]
