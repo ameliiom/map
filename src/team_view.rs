@@ -82,3 +82,27 @@ pub fn pings() -> Vec<Ping> {
     #[allow(unreachable_code)]
     Vec::new()
 }
+
+/// Whether Team draws the other players here: on a server with Team everyone else is on the team,
+/// so its roster holds every other player and its cards, world faces and map dots show them. Map
+/// then leaves players' locator points to Team (one meaning, one home).
+pub fn draws_players() -> bool {
+    covers(mates().len())
+}
+
+/// Team covers the other players once its roster has anyone in it (no roster: no Team, or alone).
+pub fn covers(mates: usize) -> bool {
+    mates > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn team_covers_players_only_with_a_roster() {
+        assert!(!covers(0));
+        assert!(covers(1));
+        assert!(covers(7));
+    }
+}

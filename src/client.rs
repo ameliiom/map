@@ -5362,10 +5362,12 @@ fn draw_tracked_in_world(game:&Game<'_>,batch:&mut HudBatch) {
     let size=[batch.width,batch.height];
     let camera=world_camera(game,&player,size);
     let points=LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error|error.into_inner());
+    // Team draws other players' faces in the world itself: their points are its, not Map's.
+    let team=::map::team_view::draws_players();
     for point in points.iter() {
         let WaypointTarget::Block(at)=point.target else {continue;};
         let (id,name)=match &point.id {
-            WaypointId::Uuid(uuid) if *uuid==game.own_uuid()=>continue,
+            WaypointId::Uuid(uuid) if *uuid==game.own_uuid() || team=>continue,
             WaypointId::Uuid(uuid)=>{
                 let id=game.remote.as_ref().and_then(|remote|remote.player_entity(*uuid));
                 (id,id.and_then(|id|game.remote_player_name(id)))
@@ -5404,9 +5406,11 @@ fn draw_locator_waypoints(game: &Game<'_>, batch: &mut HudBatch, view: &View, re
     }
     let visible_radar = ::map::radar::snapshot()
         .filter(|radar| !view.large || radar.world_map);
+    // With Team, other players are its mates and `team_view` draws them on the map already.
+    let team = ::map::team_view::draws_players();
     for point in LOCATOR_WAYPOINTS.lock().unwrap_or_else(|error| error.into_inner()).iter() {
         if let WaypointId::Uuid(uuid) = point.id
-            && (uuid == game.own_uuid() || game.remote.as_ref().and_then(|remote| remote.player_entity(uuid))
+            && (uuid == game.own_uuid() || team || game.remote.as_ref().and_then(|remote| remote.player_entity(uuid))
                 .is_some_and(|id| visible_radar.as_ref().is_some_and(|radar| radar.dots.iter().any(|dot| dot.entity_id == id))))
         {
             continue;

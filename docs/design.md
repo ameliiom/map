@@ -59,6 +59,8 @@ pictures it cites), raised wherever a clearer, more visual form exists. "Xaero" 
 ## Team
 - With Team installed, teammates show their skin face on both maps (also clamped to the frame when out of range) and
   Team's pings show as pennants in the pinger's colour.
+- 0.3.1: with Team's roster non-empty (everyone else on the server is a teammate), Map skips the vanilla locator
+  points of other players, in the world (face and name over them) and on the maps: Team draws them (`team_view::draws_players`).
 
 ## Checks
 - One layout function per screen; a test asserts that every part stays inside its container and none overlap, for
