@@ -23,6 +23,8 @@ assets/<namespace>/textures/map/icons/<entity>/<variant>.png
 `<entity>` is the entity type's path (`pig` for `minecraft:pig`, `frost_wolf` for `acme:frost_wolf`). `<variant>` is the name of the texture the entity is drawn with (`cold_cow`), and it is used first when it exists. Use a square image such as 8×8 or 16×16. Map scales it to the icon box and draws the black outline itself.
 
 ## Install
+Needs [Kit](https://github.com/ameliiom/kit) 0.1 or later, the shared code of these mods, installed the same way (`kit.hmod`, `mod.kit:true`).
+
 1. Copy `map.hmod` into `%APPDATA%\horizon\horizon-native-mods\`.
 2. Add the line `mod.map:true` to `%APPDATA%\horizon\horizon-mods.txt`.
 3. Build: in the launcher's Mods page press **Build**, or run `horizon-launcher native-build --instance horizon --trust-native-code`. Needs launcher 0.2.82 or later. A native mod runs with your rights: install it only from a source you trust.

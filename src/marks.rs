@@ -12,7 +12,7 @@
 use crate::light::{self, Rule};
 use mod_api::{
     BlockMetadata, ClientHost, ClientPacket, EquipmentSlot, Host, HostBlockStates, LevelRef, LightLayer, RenderLevelStage,
-    RenderLevelStageEvent, SettingSpec, SettingValue, WorldDepth, WorldLine,
+    RenderLevelStageEvent, WorldDepth, WorldLine,
 };
 #[allow(unused_imports)]
 use mod_api::prelude::*;
@@ -75,8 +75,7 @@ fn earned() -> bool {
 }
 
 fn switched_on(host: &dyn Host) -> bool {
-    let spec: SettingSpec = light::specs().into_iter().find(|s| s.key == light::MARKS).expect("the marks switch is a rule setting");
-    !matches!(spec.read(host.setting(crate::runtime::MOD_ID, light::MARKS).as_deref()), SettingValue::Toggle(false))
+    light::MARKS.read(host, crate::runtime::MOD_ID)
 }
 
 /// A packet that changes blocks or light around the player: the floors are looked at again soon.

@@ -9,7 +9,8 @@ pub const MIN: &str = "light_min";
 pub const MAX: &str = "light_max";
 pub const COLOUR: &str = "light_overlay_color";
 /// The in-world marks' own switch (they also need the Skills node that gives [`MARKS_TAG`]).
-pub const MARKS: &str = "light_marks";
+pub const MARKS: crate::kit::setting::Toggle =
+    crate::kit::setting::Toggle { key: "light_marks", default: true, label: Some("mwwr.setting.light_marks") };
 /// The Skills tag that earns the in-world marks (node `skills:mining` / `spawn_sight`).
 pub const MARKS_TAG: &str = "map.marks";
 
@@ -24,7 +25,7 @@ pub fn specs() -> Vec<SettingSpec> {
         SettingSpec::color(COLOUR, "mwwr.setting.light_overlay_color", DIM),
         SettingSpec::range(MIN, "mwwr.setting.light_min", 0., 15., 1., 0.),
         SettingSpec::range(MAX, "mwwr.setting.light_max", 0., 15., 1., 7.),
-        SettingSpec::toggle(MARKS, "mwwr.setting.light_marks", true),
+        MARKS.spec(crate::runtime::MOD_ID),
     ]
 }
 
@@ -96,6 +97,6 @@ mod tests {
     #[test]
     fn every_rule_setting_is_registered_once() {
         let keys: Vec<String> = specs().iter().map(|s| s.key.clone()).collect();
-        assert_eq!(keys, [SOURCE, COLOUR, MIN, MAX, MARKS]);
+        assert_eq!(keys, [SOURCE, COLOUR, MIN, MAX, MARKS.key]);
     }
 }

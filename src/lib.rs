@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use mod_api::{self, Hooks, KeyRegistration, Registrar, RegistrationContext, SettingSpec};
+// Kit (ameliiom/kit), the shared code: the installed Kit mod, or its source in place for
+// local builds (`kit_local`, horizon-mods/.cargo/config.toml).
+#[cfg(kit_local)]
+#[allow(dead_code)]
+#[path = "../../kit/src/lib.rs"]
+mod kit;
+#[cfg(not(kit_local))]
+use ::kit;
 pub mod light;
 pub mod look;
 pub mod marks;

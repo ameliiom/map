@@ -1,6 +1,6 @@
 [package]
 name = "map"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-only"
@@ -11,3 +11,6 @@ license = "GPL-3.0-only"
 # pinned with `horizon-launcher native-lock .` before building.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 
+[lints.rust]
+# `kit_local`: set for local builds by horizon-mods/.cargo/config.toml (Kit's source in place).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kit_local)'] }
