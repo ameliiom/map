@@ -3201,6 +3201,8 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         dimension,
         controller.settings().cache_ram_mib,
     );
+    // Ground a friend explored fills what this map has never seen (`ground.rs`).
+    ::map::ground::drain_incoming(dimension, |chunk, tile| controller.maps.submit_shared(state.session, dimension, chunk, tile));
     if state.dimension != dimension {
         state.lod_sources.clear();
         state.frame = None;

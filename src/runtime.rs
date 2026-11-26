@@ -7805,6 +7805,19 @@ pub mod maps {
             self.clock += 1;
             self.tiles.insert(key, (self.clock, Arc::new(tile)));
         }
+        /// A friend's surface chunk (`ground.rs`): kept only where this map has no tile of its
+        /// own, in memory or on disk, so what this player saw is never covered. True when kept.
+        pub fn insert_shared(&mut self, dimension: Dimension, chunk: [i32; 2], tile: Tile) -> bool {
+            if tile.pixels.len() != 1024 || self.tile_at((dimension, Layer::Surface, chunk[0], chunk[1])).is_some() {
+                return false;
+            }
+            self.insert(dimension, Layer::Surface, chunk, tile);
+            true
+        }
+        #[cfg(test)]
+        pub fn surface_pixels(&self, dimension: Dimension, chunk: [i32; 2]) -> Option<Vec<u8>> {
+            self.tile_at((dimension, Layer::Surface, chunk[0], chunk[1])).map(|t| t.pixels.clone())
+        }
         pub fn insert_lod(&mut self, dimension: Dimension, key: LodKey, tile: Tile) -> bool {
             if key.level > 22
                 || tile.pixels.len() != 1024
@@ -8499,6 +8512,13 @@ pub mod maps {
             chunk: [i32; 2],
             sample: Box<dyn FnOnce() -> ChunkSample + Send>,
         },
+        /// A friend's surface chunk (`ground.rs`), kept only where this map has none.
+        Shared {
+            session: u64,
+            dimension: Dimension,
+            chunk: [i32; 2],
+            tile: Tile,
+        },
         Wake,
     }
     pub type ReadXaeroRegion = Box<dyn Fn(&std::path::Path, [i32; 2], Option<i32>) -> io::Result<crate::xaero_cache::Region> + Send>;
@@ -8819,6 +8839,10 @@ pub mod maps {
                                     let tile = cache.tiles[&(dimension, layer, chunk[0], chunk[1])]
                                         .1
                                         .clone();
+                                    // This map's own ground goes to the other players (`ground.rs`).
+                                    if layer == Layer::Surface {
+                                        crate::ground::upload(dimension, chunk, &tile);
+                                    }
                                     let key = record_key(dimension, layer, chunk[0], chunk[1]);
                                     cache.save(key, tile.clone()).and_then(|()| {
                                         if let Some((appearance, alternate)) = alternate {
@@ -8826,6 +8850,19 @@ pub mod maps {
                                         }
                                         Ok(())
                                     })
+                                }
+                                Job::Shared { session, dimension, chunk, tile }
+                                    if session == current
+                                        && session == active.load(Ordering::Acquire)
+                                        && configured.as_ref().is_none_or(|b| b.dimension == dimension) =>
+                                {
+                                    if cache.insert_shared(dimension, chunk, tile) {
+                                        changed = true;
+                                        let tile = cache.tiles[&(dimension, Layer::Surface, chunk[0], chunk[1])].1.clone();
+                                        cache.save(record_key(dimension, Layer::Surface, chunk[0], chunk[1]), tile)
+                                    } else {
+                                        Ok(())
+                                    }
                                 }
                                 Job::Lod {
                                     session,
@@ -9184,6 +9221,17 @@ pub mod maps {
                     })
                     .is_ok()
                 })
+        }
+        /// A friend's surface chunk for the worker (`ground.rs`); false when it is busy.
+        pub fn submit_shared(&self, session: u64, dimension: Dimension, chunk: [i32; 2], tile: Tile) -> bool {
+            if self.paused.load(Ordering::Acquire) {
+                return false;
+            }
+            self.wake
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|tx| tx.try_send(Job::Shared { session, dimension, chunk, tile }).is_ok())
         }
         pub fn request(&self, view: View) {
             self.request_ahead(view.clone(), view);

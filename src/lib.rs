@@ -8,6 +8,7 @@ use mod_api::{self, Hooks, KeyRegistration, Registrar, RegistrationContext, Sett
 mod kit;
 #[cfg(not(kit_local))]
 use ::kit;
+pub mod ground;
 pub mod light;
 pub mod look;
 pub mod marks;
@@ -341,17 +342,45 @@ impl Hooks for Mod {
             ))
             .expect("valid minimap action");
         }
+        // Shared explored ground (`ground.rs`): optional, so a server or client without Map
+        // still plays; each side's map then keeps only its own ground.
+        let mut handlers = r.payload_handlers();
+        let mut v1 = handlers.registrar("1").optional();
+        let _ = ground::UP.set(v1.play_to_server_typed(PayloadId("map:ground_up".into()), ground::server_receive));
+        let _ = ground::DOWN.set(v1.play_to_client_typed(PayloadId("map:ground_down".into()), ground::client_receive));
     }
 
     fn client_player_logging_out(&self, _: &mut dyn ClientHost, _: &mut ClientPlayerLoggingOutEvent) {
         radar::clear();
         runtime::take_shared_waypoint();
         marks::reset();
+        ground::client_reset();
+    }
+
+    /// Server: each player is sent a few chunks others explored (`ground.rs`).
+    fn server_tick(&self, host: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
+        if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
+            ground::server_tick(host);
+        }
+    }
+
+    /// A player's file is read from the world's `players/data`: the world's shared ground loads.
+    fn player_load_from_file(&self, _: &mut dyn ServerHost, event: &mut PlayerLoadFromFileEvent<'_>) {
+        ground::world(event.directory);
+    }
+
+    fn world_saved(&self, _: &mut dyn ServerHost, _: &mut WorldSavedEvent) {
+        ground::save();
+    }
+
+    fn server_stopping(&self, _: &mut dyn ServerHost, _: &mut ServerStoppingEvent) {
+        ground::stop();
     }
 
     /// The light overlay in the world (`marks.rs`): looked at again on a move or a change.
     fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
         marks::tick(host);
+        ground::client_tick(host);
     }
 
     fn client_packet(&self, _: &mut dyn ClientHost, event: &mut ClientPacketEvent<'_>) {
