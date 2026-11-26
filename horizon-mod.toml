@@ -1,6 +1,6 @@
 id = "map"
 name = "Map"
-version = "0.2.9"
+version = "0.3.0"
 description = "A minimap and a world map that remembers where you have been: waypoints, death points, entity radar, cave view and more."
 authors = ["ameliiom"]
 credits = "Adapted from trail by groznen95, itself based on Minimap, Worldmap and waypoints reworked by daniliammo and Gurov08ruS (GPL-3.0)."
@@ -14,6 +14,8 @@ capabilities = ["registries"]
 # Team, when installed, puts teammates and pings on both maps (`team_view`).
 [dependencies]
 team = { version = "^0.3", optional = true }
+# Skills, when installed, earns the in-world light marks (node `spawn_sight`, tag `map.marks`).
+skills = { version = "^0.2.1", optional = true }
 
 [native]
 game = "26.3"

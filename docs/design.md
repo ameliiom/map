@@ -63,3 +63,25 @@ pictures it cites), raised wherever a clearer, more visual form exists. "Xaero" 
 ## Checks
 - One layout function per screen; a test asserts that every part stays inside its container and none overlap, for
   short, long and empty names, many entities and every corner.
+
+## Light marks in the world (0.3.0, 2026-11-26)
+
+The light overlay's rule (`light.rs`, one `Rule` for both views: block or sky light between
+`light_min` and `light_max`, red at 0 and yellow above, or the chosen colour) is also drawn in the
+world (`marks.rs`): while a torch is in either hand, a cross on every opaque full block within 16
+blocks (8 up and down) with two airs above whose spot the rule marks. Found again only on a move,
+a change of the rule's settings, or a block or light packet (2 and 12 ticks later); drawn as lines
+each frame. Moved here from Hands 0.3 (its own spawn marks repeated this overlay).
+
+- Earned with Map's node **Spawn Sight** (`data/map/skills/mining.json`, extends Skills' Mining,
+  tag `map.marks`); the client asks Skills (`skills::has_tag`, optional dependency `skills ^0.2.1`).
+  Without Skills the marks never show.
+- Switch: `light_marks` (on by default).
+
+| Check (in the game) | Result |
+|---|---|
+| Mining tab | Spawn Sight at row 4, beside Lucky; Gathering's and Hands' nodes on their own spots |
+| Node unlocked, torch held in a dark stone room | a red cross on every floor block |
+| A torch placed in the room (room lit to 8+) | the crosses gone |
+| Pickaxe in hand | no crosses |
+

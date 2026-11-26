@@ -8,6 +8,9 @@ A minimap and a world map for [Horizon](https://playhorizon.dev) (Minecraft: Jav
 - **Waypoints** (`N` for the list, `R` to create one here): list, create and edit screens, sets, sharing, death points.
 - **With [Team](https://github.com/ameliiom/team)** (0.3 or later, optional): each teammate's face on both maps (on the edge of the minimap when far) and every ping as a pennant in its owner's colour, with a sword for danger and the block for loot.
 - Cave view, chunk grid, slime chunks, light overlay, footsteps, PNG export, and import of Xaero's waypoints and settings.
+- **Light marks in the world** (with [Skills](https://github.com/ameliiom/skills) 0.2.1 or later, optional): unlock **Spawn Sight** in the Mining tree, and while you hold a torch the light overlay's rule is drawn on the ground around you too: a red cross where the light is 0 (monsters spawn), yellow where it is still low. Same settings as the overlay (light source, min, max, colour); its own switch **Light marks in the world**.
+
+![Light marks](docs/light-marks.png)
 
 ## Map icons
 Every creature on the maps has an icon of one size. Map draws it from the creature's own model: the front of its head with whatever stands on it. A resource pack or a mod can supply its own icon instead, for any entity of any namespace:

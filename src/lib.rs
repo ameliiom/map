@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use mod_api::{self, Hooks, KeyRegistration, Registrar, RegistrationContext, SettingSpec};
+pub mod light;
 pub mod look;
+pub mod marks;
 pub mod radar;
 pub mod team_view;
 pub mod map_claims;
@@ -207,26 +209,18 @@ impl Hooks for Mod {
         )).expect("valid minimap frame");
         r.register_setting(SettingSpec::color("minimap_frame_color","mwwr.setting.minimap_frame_color",0x44444a))
             .expect("valid frame color");
-        r.register_setting(SettingSpec::choice(
-            "light_source",
-            "mwwr.setting.light_source",
-            ["mwwr.value.light_source.0", "mwwr.value.light_source.1"],
-            0,
-        )).expect("valid light source");
+        for spec in light::specs() {
+            r.register_setting(spec).expect("valid light rule setting");
+        }
         for (key, color) in [
             ("minimap_marker_color",0xcc1919),
             ("world_marker_color",0xcc1919),
             ("minimap_grid_color",0x525f70),
             ("minimap_compass_color",0x000000),
             ("minimap_compass_north",0x000000),
-            ("light_overlay_color",0xf7c15d),
         ] {
             r.register_setting(SettingSpec::color(key,format!("mwwr.setting.{key}"),color))
                 .expect("valid map color");
-        }
-        for (key, value) in [("light_min", 0.), ("light_max", 7.)] {
-            r.register_setting(SettingSpec::range(key, format!("mwwr.setting.{key}"), 0., 15., 1., value))
-                .expect("valid light level");
         }
         for (key, min, max, step, default) in [
             ("waypoint_world_opacity", 0., 100., 1., 100.),
@@ -344,6 +338,20 @@ impl Hooks for Mod {
     fn client_player_logging_out(&self, _: &mut dyn ClientHost, _: &mut ClientPlayerLoggingOutEvent) {
         radar::clear();
         runtime::take_shared_waypoint();
+        marks::reset();
+    }
+
+    /// The light overlay in the world (`marks.rs`): looked at again on a move or a change.
+    fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
+        marks::tick(host);
+    }
+
+    fn client_packet(&self, _: &mut dyn ClientHost, event: &mut ClientPacketEvent<'_>) {
+        marks::packet(event.packet);
+    }
+
+    fn render_level_stage(&self, _: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
+        marks::draw(event);
     }
 
     fn register_client_commands(&self, _: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {

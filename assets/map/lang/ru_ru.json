@@ -103,6 +103,7 @@
   "mwwr.setting.light_source": "Источник света",
   "mwwr.value.light_source.0": "Свет блоков",
   "mwwr.value.light_source.1": "Небесный свет",
+  "mwwr.setting.light_marks": "Light marks in the world (holding a torch)",
   "mwwr.setting.light_min": "Минимальный свет",
   "mwwr.setting.light_max": "Максимальный свет",
   "mwwr.setting.radar_world_map": "Радар на карте мира",
@@ -284,5 +285,7 @@
   "mwwr.setting.world_cave_type": "Тип пещерного слоя карты мира",
   "mwwr.key.slime_map": "Карта слизневых чанков",
   "mwwr.key.create_waypoint": "Создать метку",
-  "mwwr.key.map_settings": "Настройки карт"
+  "mwwr.key.map_settings": "Настройки карт",
+  "mwwr.node.spawn_sight": "Spawn Sight",
+  "skills.perk.map.marks": "With Map: while you hold a torch, marks on the ground show the spots the map's light overlay marks"
 }

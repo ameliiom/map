@@ -5483,11 +5483,14 @@ fn draw_light_overlay(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: 
     {
         return;
     }
-    let source = game.map_option("light_source").unwrap_or(0);
-    let min = game.map_option("light_min").unwrap_or(0);
-    let max = game.map_option("light_max").unwrap_or(7);
-    let color=game.stored_setting(runtime::MOD_ID,"light_overlay_color")
-        .and_then(|value|value.parse::<u32>().ok()).filter(|rgb|*rgb<=0xffffff);
+    // One rule for the overlay and the in-world marks (`::map::light`).
+    let rule = ::map::light::Rule {
+        sky: game.map_option(::map::light::SOURCE) == Some(1),
+        min: game.map_option(::map::light::MIN).unwrap_or(0),
+        max: game.map_option(::map::light::MAX).unwrap_or(7),
+        colour: game.stored_setting(runtime::MOD_ID, ::map::light::COLOUR)
+            .and_then(|value| value.parse::<u32>().ok()).filter(|rgb| *rgb <= 0xffffff),
+    };
     let y = match view.layer { Layer::Surface | Layer::Below(maps::FULL_CAVE) => player.y.floor() as i32, Layer::Below(y) => y };
     let [cx, cz] = view.center.map(|value| value.floor() as i32);
     for z in (cz - 24)..=(cz + 24) {
@@ -5495,10 +5498,8 @@ fn draw_light_overlay(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: 
             let at = world_screen(view, rect, [f64::from(x) + 0.5, f64::from(z) + 0.5]);
             if !map_overlay_inside(at, rect, view.round) { continue; }
             if let Some((block, sky)) = game.map_light_if_loaded([x, y, z]) {
-                let light = if source == 0 { block } else { sky };
-                if (min..=max).contains(&light) {
-                    let alpha=if light==0 {0xef000000}else{0xdf000000};
-                    game.native_fill(batch,[at[0],at[1],1.5,1.5],alpha|color.unwrap_or(if light==0 {0xfd645f}else{0xf7c15d}));
+                if let Some(colour) = rule.colour(block, sky) {
+                    game.native_fill(batch,[at[0],at[1],1.5,1.5],colour);
                 }
             }
         }

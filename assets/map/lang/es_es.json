@@ -103,6 +103,7 @@
   "mwwr.setting.light_source": "Fuente de luz",
   "mwwr.value.light_source.0": "Luz de bloques",
   "mwwr.value.light_source.1": "Luz del cielo",
+  "mwwr.setting.light_marks": "Light marks in the world (holding a torch)",
   "mwwr.setting.light_min": "Luz mínima",
   "mwwr.setting.light_max": "Luz máxima",
   "mwwr.setting.radar_world_map": "Radar en el mapa del mundo",
@@ -223,5 +224,7 @@
   "mwwr.setting.map_open_animation": "World map opening animation",
   "mwwr.setting.minimap_compass_front": "Compass in front of map overlays",
   "mwwr.setting.waypoints_new_bottom": "New waypoints at bottom",
-  "mwwr.setting.map_write_radius": "Map writing radius in chunks (-1 uses all received chunks)"
+  "mwwr.setting.map_write_radius": "Map writing radius in chunks (-1 uses all received chunks)",
+  "mwwr.node.spawn_sight": "Spawn Sight",
+  "skills.perk.map.marks": "With Map: while you hold a torch, marks on the ground show the spots the map's light overlay marks"
 }

@@ -1,0 +1,20 @@
+{
+  "extends": "skills:mining",
+  "nodes": [
+    {
+      "id": "map_spawn_sight",
+      "title": "mwwr.node.spawn_sight",
+      "icon": "minecraft:redstone_torch",
+      "at": [
+        1,
+        3
+      ],
+      "cost": 2,
+      "perks": [
+        {
+          "tag": "map.marks"
+        }
+      ]
+    }
+  ]
+}

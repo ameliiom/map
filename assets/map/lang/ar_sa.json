@@ -103,6 +103,7 @@
   "mwwr.setting.light_source": "مصدر الإضاءة",
   "mwwr.value.light_source.0": "إضاءة الكتل",
   "mwwr.value.light_source.1": "إضاءة السماء",
+  "mwwr.setting.light_marks": "علامات الإضاءة في العالم (مع شعلة)",
   "mwwr.setting.light_min": "أدنى إضاءة",
   "mwwr.setting.light_max": "أقصى إضاءة",
   "mwwr.setting.radar_world_map": "إظهار الرادار على خريطة العالم",
@@ -408,5 +409,7 @@
   "map.ui.color_5": "برتقالي",
   "map.ui.color_6": "سماوي",
   "map.ui.color_7": "أبيض",
-  "mwwr.setting.world_far_terrain": "التضاريس البعيدة من LOD اللعبة"
+  "mwwr.setting.world_far_terrain": "التضاريس البعيدة من LOD اللعبة",
+  "mwwr.node.spawn_sight": "عين الوحوش",
+  "skills.perk.map.marks": "مع الخريطة: وأنت ماسك شعلة، علامات على الأرض تبين الأماكن المظلمة اللي تبينها طبقة الإضاءة"
 }

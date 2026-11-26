@@ -103,6 +103,7 @@
   "mwwr.setting.light_source": "Light source",
   "mwwr.value.light_source.0": "Block light",
   "mwwr.value.light_source.1": "Skylight",
+  "mwwr.setting.light_marks": "Light marks in the world (holding a torch)",
   "mwwr.setting.light_min": "Minimum light",
   "mwwr.setting.light_max": "Maximum light",
   "mwwr.setting.radar_world_map": "Show radar on the world map",
@@ -408,5 +409,7 @@
   "map.ui.color_5": "Orange",
   "map.ui.color_6": "Aqua",
   "map.ui.color_7": "White",
-  "mwwr.setting.world_far_terrain": "Far terrain from the game's LOD"
+  "mwwr.setting.world_far_terrain": "Far terrain from the game's LOD",
+  "mwwr.node.spawn_sight": "Spawn Sight",
+  "skills.perk.map.marks": "With Map: while you hold a torch, marks on the ground show the spots the map's light overlay marks"
 }
