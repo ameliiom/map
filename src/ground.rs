@@ -9,6 +9,7 @@
 //! - **Down** (server → client): each player gets, a few per tick, only the chunks of the
 //!   dimension they are in that others explored and that they haven't been sent yet (a cursor
 //!   per player and dimension, kept with the store): deltas, never the whole map again.
+//! The world's shared waypoints (`points.rs`) live beside the ground in the same server half.
 //! - **Shown** (client): a chunk from a friend fills ground this map has never seen; what this
 //!   client saw itself is never overwritten ([`crate::runtime::maps::Cache::insert_shared`]).
 use crate::kit::sync::lock;
@@ -343,9 +344,29 @@ struct Server {
     /// The world folder the store belongs to.
     world: Option<PathBuf>,
     store: Store,
+    /// The world's shared waypoints (`points.rs`), kept and saved beside the ground.
+    points: crate::points::Points,
 }
 
 static SERVER: Mutex<Option<Server>> = Mutex::new(None);
+/// The shared waypoints' file in the world folder.
+const POINTS_FILE: &str = "map-shared-points.txt";
+
+/// The loaded world's shared waypoints, when a world is loaded.
+pub fn with_points(f: impl FnOnce(&mut crate::points::Points)) {
+    if let Some(server) = lock(&SERVER).as_mut()
+        && server.world.is_some()
+    {
+        f(&mut server.points);
+    }
+}
+
+/// Server tick: the shared waypoints' changes go down too.
+pub fn points_tick(host: &mut dyn ServerHost) {
+    if let Some(server) = lock(&SERVER).as_mut() {
+        crate::points::server_tick(host, &mut server.points);
+    }
+}
 
 fn file(world: &Path) -> PathBuf {
     world.join(FILE)
@@ -368,25 +389,34 @@ fn write(world: &Path, store: &Store) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
-/// A player's file was read from `<world>/players/data`: the world's store is loaded once.
-pub fn world(directory: &Path) {
+/// A player's file was read from `<world>/players/data`: the world's stores are loaded once, and
+/// the joining `player` is owed every shared waypoint again.
+pub fn world(directory: &Path, player: u128) {
     let Some(world) = directory.parent().and_then(Path::parent) else { return };
     let mut server = lock(&SERVER);
     let server = server.get_or_insert_with(Server::default);
-    if server.world.as_deref() == Some(world) {
-        return;
+    if server.world.as_deref() != Some(world) {
+        save_into(server);
+        let points = std::fs::read_to_string(world.join(POINTS_FILE)).map(|t| crate::points::Points::from_text(&t)).unwrap_or_default();
+        *server = Server { world: Some(world.to_path_buf()), store: read(world), points };
     }
-    save_into(server);
-    *server = Server { world: Some(world.to_path_buf()), store: read(world) };
+    server.points.joined(player);
 }
 
 fn save_into(server: &mut Server) {
-    if let Some(world) = &server.world
-        && server.store.dirty
-    {
+    let Some(world) = &server.world else { return };
+    if server.store.dirty {
         match write(world, &server.store) {
             Ok(()) => server.store.dirty = false,
             Err(e) => eprintln!("[map] saving the shared ground: {e}"),
+        }
+    }
+    if server.points.dirty {
+        let path = world.join(POINTS_FILE);
+        let tmp = path.with_extension("txt.tmp");
+        match std::fs::write(&tmp, server.points.to_text()).and_then(|()| std::fs::rename(&tmp, &path)) {
+            Ok(()) => server.points.dirty = false,
+            Err(e) => eprintln!("[map] saving the shared waypoints: {e}"),
         }
     }
 }

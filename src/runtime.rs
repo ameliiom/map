@@ -2837,6 +2837,9 @@ struct State {
 struct WaypointGroups {
     named: BTreeMap<String,BTreeSet<String>>,
     active: BTreeMap<String,String>,
+    /// Sets kept to yourself: their waypoints aren't shared with friends (`points.rs`); every
+    /// other set is shared.
+    private: BTreeMap<String,BTreeSet<String>>,
 }
 
 impl WaypointGroups {
@@ -2844,13 +2847,15 @@ impl WaypointGroups {
         let mut groups = Self::default();
         for line in text.lines() {
             let Some((key,value)) = line.split_once('=') else {continue};
-            if !matches!(key,"waypoint_group_v1"|"waypoint_active_group_v1") {continue;}
+            if !matches!(key,"waypoint_group_v1"|"waypoint_active_group_v1"|"waypoint_private_group_v1") {continue;}
             let Some((world,group)) = value.split_once(':') else {continue};
             let world = unescape_name(world);
             let group = unescape_name(group);
             if !valid_waypoint_world(&world) || !valid_group(&group) {continue;}
             if key=="waypoint_group_v1" {
                 groups.named.entry(world).or_default().insert(group);
+            } else if key=="waypoint_private_group_v1" {
+                groups.private.entry(world).or_default().insert(group);
             } else {
                 groups.active.insert(world,group);
             }
@@ -2868,6 +2873,29 @@ impl WaypointGroups {
         for (world,name) in &self.active {
             let _ = writeln!(text,"waypoint_active_group_v1={}:{}",escape_name(world),escape_name(name));
         }
+        for (world,names) in &self.private {
+            for name in names {
+                let _ = writeln!(text,"waypoint_private_group_v1={}:{}",escape_name(world),escape_name(name));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod waypoint_group_sharing_tests {
+    use super::WaypointGroups;
+
+    #[test]
+    fn a_private_set_survives_the_file_and_other_sets_stay_shared() {
+        let mut groups = WaypointGroups::default();
+        groups.named.entry("save:w".into()).or_default().insert("Mine".into());
+        groups.private.entry("save:w".into()).or_default().insert("Mine".into());
+        groups.private.entry("save:w".into()).or_default().insert(String::new());
+        let mut text = String::new();
+        groups.write(&mut text);
+        let back = WaypointGroups::decode(&text);
+        assert_eq!(back.private["save:w"].len(), 2, "a named set and the default set");
+        assert!(back.private["save:w"].contains("Mine") && !back.private.contains_key("save:other"));
     }
 }
 
@@ -3101,6 +3129,24 @@ impl Controller {
         if let Some(notify)=notify.as_ref(){let _=notify.try_send(());}
     }
 
+    /// The sets of `world` kept to yourself (not shared with friends).
+    pub fn private_waypoint_groups(&self, world: &str) -> BTreeSet<String> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).groups.private.get(world).cloned().unwrap_or_default()
+    }
+
+    /// Shares the set `group` of `world` with friends, or keeps it to yourself.
+    pub fn share_waypoint_group(&self, world: &str, group: &str, shared: bool) {
+        if !valid_waypoint_world(world) || !valid_group(group) {return;}
+        let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let private = state.groups.private.entry(world.to_owned()).or_default();
+        let changed = if shared { private.remove(group) } else { private.insert(group.to_owned()) };
+        if changed {
+            state.revision += 1;
+            if let Some(notify)=notify.as_ref(){let _=notify.try_send(());}
+        }
+    }
+
     pub fn add_waypoint_groups(&self, world: &str, names: impl IntoIterator<Item=String>) -> bool {
         if !valid_waypoint_world(world) {return false;}
         let notify = self.notify.lock().unwrap_or_else(|error| error.into_inner());
@@ -3137,6 +3183,9 @@ impl Controller {
         if let Some(active) = state.groups.active.get_mut(world) && active==old {
             *active = new.to_owned();
         }
+        if let Some(private) = state.groups.private.get_mut(world) && private.remove(old) {
+            private.insert(new.to_owned());
+        }
         state.revision += 1;
         if let Some(notify)=notify.as_ref(){let _=notify.try_send(());}
         true
@@ -3150,6 +3199,7 @@ impl Controller {
             || !state.groups.named.get_mut(world).is_some_and(|groups| groups.remove(group))
         {return false;}
         if state.groups.active.get(world).is_some_and(|active| active==group){state.groups.active.remove(world);}
+        if let Some(private) = state.groups.private.get_mut(world) {private.remove(group);}
         state.revision += 1;
         if let Some(notify)=notify.as_ref(){let _=notify.try_send(());}
         true

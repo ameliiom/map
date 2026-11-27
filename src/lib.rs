@@ -10,6 +10,7 @@ mod kit;
 use ::kit;
 pub mod ground;
 pub mod light;
+pub mod points;
 pub mod look;
 pub mod marks;
 pub mod radar;
@@ -204,6 +205,7 @@ impl Hooks for Mod {
             ("locator_world",false),
             ("minimap_hide_screens",false),
             ("world_map_distances",false),
+            ("share_waypoints",true),
             ("world_far_terrain",false),
 
         ] {
@@ -348,6 +350,9 @@ impl Hooks for Mod {
         let mut v1 = handlers.registrar("1").optional();
         let _ = ground::UP.set(v1.play_to_server_typed(PayloadId("map:ground_up".into()), ground::server_receive));
         let _ = ground::DOWN.set(v1.play_to_client_typed(PayloadId("map:ground_down".into()), ground::client_receive));
+        // Shared waypoints (`points.rs`), on the same optional registrar.
+        let _ = points::UP.set(v1.play_to_server_typed(PayloadId("map:points_up".into()), points::server_receive));
+        let _ = points::DOWN.set(v1.play_to_client_typed(PayloadId("map:points_down".into()), points::client_receive));
     }
 
     fn client_player_logging_out(&self, _: &mut dyn ClientHost, _: &mut ClientPlayerLoggingOutEvent) {
@@ -355,18 +360,20 @@ impl Hooks for Mod {
         runtime::take_shared_waypoint();
         marks::reset();
         ground::client_reset();
+        points::client_reset();
     }
 
     /// Server: each player is sent a few chunks others explored (`ground.rs`).
     fn server_tick(&self, host: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
             ground::server_tick(host);
+            ground::points_tick(host);
         }
     }
 
     /// A player's file is read from the world's `players/data`: the world's shared ground loads.
     fn player_load_from_file(&self, _: &mut dyn ServerHost, event: &mut PlayerLoadFromFileEvent<'_>) {
-        ground::world(event.directory);
+        ground::world(event.directory, event.player);
     }
 
     fn world_saved(&self, _: &mut dyn ServerHost, _: &mut WorldSavedEvent) {
@@ -381,6 +388,7 @@ impl Hooks for Mod {
     fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
         marks::tick(host);
         ground::client_tick(host);
+        points::client_tick(host);
     }
 
     fn client_packet(&self, _: &mut dyn ClientHost, event: &mut ClientPacketEvent<'_>) {

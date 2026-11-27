@@ -962,6 +962,7 @@ fn draw_pennant(
     waypoint: &Waypoint,
     letter: &str,
     scale: f32,
+    death_fill: u32,
 ) {
     let at = world_screen(view, rect, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
     if !inside(at, rect) {
@@ -971,7 +972,7 @@ fn draw_pennant(
     let width = game.map_text_width(letter) * look::PENNANT_FONT;
     let scale = scale.max(0.25) * ((width + 4.) / look::PENNANT[0]).max(1.);
     let (body, [left, right, tip]) = look::pennant(at, scale);
-    let fill = if skull { look::DEATH_FILL } else { waypoint_argb(if waypoint.color == 0 { 0xffffff } else { waypoint.color }) };
+    let fill = if skull { death_fill } else { waypoint_argb(if waypoint.color == 0 { 0xffffff } else { waypoint.color }) };
     let backgrounds = game.map_option("world_waypoint_backgrounds") != Some(0);
     if backgrounds {
         let o = look::PENNANT_SHADOW_OFFSET * scale;
@@ -1817,6 +1818,8 @@ enum SetRow {
     Select(Option<String>),
     Rename(String),
     DeleteEmpty(String),
+    /// The chosen set's sharing with friends, and whether it is shared now.
+    Share(String, bool),
 }
 
 /// The set dropdown's rows under the set bar, as many as fit above the actions.
@@ -1827,6 +1830,10 @@ fn set_rows(game: &Game<'_>, state: &State, bar: [f32; 4], bottom: f32) -> Vec<(
         if shown_waypoints(state).next().is_none() {
             rows.push(SetRow::DeleteEmpty(name.clone()));
         }
+    }
+    if let Some(name) = state.waypoint_group.as_ref() {
+        let private = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).private_waypoint_groups(&state.world);
+        rows.push(SetRow::Share(name.clone(), !private.contains(name)));
     }
     let fit = (((bottom - bar[1] - bar[3]) / bar[3]).floor().max(1.)) as usize;
     let start = state.waypoint_groups_scroll.min(rows.len().saturating_sub(fit));
@@ -1840,6 +1847,7 @@ fn set_row_label(row: &SetRow) -> String {
         SetRow::Select(group) => group_label(group.as_deref()),
         SetRow::Rename(_) => ui("rename_set"),
         SetRow::DeleteEmpty(_) => ui("delete_empty_set"),
+        SetRow::Share(_, shared) => ui(if *shared { "set_shared" } else { "set_private" }),
     }
 }
 
@@ -3194,6 +3202,12 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     poll_waypoint_import(&mut state);
     poll_cache_import(&mut state);
     state.waypoints = controller.waypoints(&state.world);
+    // Shared waypoints (`points.rs`): every enabled waypoint whose set is shared goes to friends.
+    let private = controller.private_waypoint_groups(&state.world);
+    ::map::points::offer(
+        game.map_option("share_waypoints") != Some(0),
+        state.waypoints.iter().filter(|point| !point.options.disabled && !private.contains(&point.options.group)),
+    );
     let dimension = Dimension::from_id(player.dimension);
     controller.maps.configure(
         state.session,
@@ -4442,22 +4456,50 @@ fn draw_minimap_waypoints(
     for (index, waypoint) in state.waypoints.iter().enumerate()
         .filter(|(_, point)| point.dimension == view.dimension && map_waypoint_visible(game, state, point))
     {
-        let at = world_screen(view, map, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
-        let square = look::waypoint_square(map, round, at);
-        let centre = [square[0] + square[2] * 0.5, square[1] + square[3] * 0.5];
-        if waypoint.icon == runtime::WaypointIcon::Skull {
-            game.native_fill(batch, square, look::DEATH_FILL);
-            draw_skull(game, batch, centre, square[2] * 0.8);
-            continue;
-        }
-        let letter = waypoint_text(state, index, waypoint);
-        let width = game.map_text_width(&letter);
-        let side = square[2].max(width + 2.);
-        let rect = [centre[0] - side * 0.5, square[1], side, square[3]];
-        let rgb = if waypoint.color == 0 { 0x00ff_ffff } else { waypoint.color & 0x00ff_ffff };
-        game.native_fill(batch, rect, (alpha << 24) | rgb);
-        game.map_text(batch, &letter, [(centre[0] - width * 0.5).round(), (centre[1] - 4.).round()], look::INITIAL_TEXT, true);
+        draw_minimap_point(game, batch, view, map, round, alpha, waypoint, &waypoint_text(state, index, waypoint), look::DEATH_FILL);
     }
+    // Friends' waypoints (`points.rs`), in their maker's colour; a friend's death point too.
+    if game.map_option("share_waypoints") != Some(0) {
+        for (_, waypoint) in ::map::points::friends(view.dimension, ::map::team_view::colour) {
+            let fill = 0xff00_0000 | waypoint.color;
+            draw_minimap_point(game, batch, view, map, round, alpha, &waypoint, &friend_text(&waypoint), fill);
+        }
+    }
+}
+
+/// One waypoint on the minimap: a square of its colour with its text, clamped onto the frame
+/// when out of range; a death point is a square of `death_fill` with a skull.
+#[allow(clippy::too_many_arguments)]
+fn draw_minimap_point(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    map: [f32; 4],
+    round: bool,
+    alpha: u32,
+    waypoint: &Waypoint,
+    letter: &str,
+    death_fill: u32,
+) {
+    let at = world_screen(view, map, [f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
+    let square = look::waypoint_square(map, round, at);
+    let centre = [square[0] + square[2] * 0.5, square[1] + square[3] * 0.5];
+    if waypoint.icon == runtime::WaypointIcon::Skull {
+        game.native_fill(batch, square, death_fill);
+        draw_skull(game, batch, centre, square[2] * 0.8);
+        return;
+    }
+    let width = game.map_text_width(letter);
+    let side = square[2].max(width + 2.);
+    let rect = [centre[0] - side * 0.5, square[1], side, square[3]];
+    let rgb = if waypoint.color == 0 { 0x00ff_ffff } else { waypoint.color & 0x00ff_ffff };
+    game.native_fill(batch, rect, (alpha << 24) | rgb);
+    game.map_text(batch, letter, [(centre[0] - width * 0.5).round(), (centre[1] - 4.).round()], look::INITIAL_TEXT, true);
+}
+
+/// A friend's waypoint's text: its initials, else its name's first letter.
+fn friend_text(waypoint: &Waypoint) -> String {
+    waypoint.initials.clone().unwrap_or_else(|| first_letter(&waypoint.name).to_string())
 }
 
 fn upload_terrain_patches(
@@ -5705,7 +5747,17 @@ fn draw(
                 waypoint,
                 &waypoint_text(state, index, waypoint),
                 game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32,
+                look::DEATH_FILL,
             );
+        }
+        // Friends' waypoints (`points.rs`), in their maker's colour.
+        if large && game.map_option("world_map_waypoints") != Some(0) && game.map_option("share_waypoints") != Some(0)
+            && f64::from(rect[2])/frame.view.span[0]>=game.map_number("world_waypoint_zoom_min").unwrap_or(0.)
+        {
+            let scale = game.map_number("world_waypoint_symbol_scale").unwrap_or(1.) as f32;
+            for (_, waypoint) in ::map::points::friends(frame.view.dimension, ::map::team_view::colour) {
+                draw_pennant(game, batch, &frame.view, rect, &waypoint, &friend_text(&waypoint), scale, 0xff00_0000 | waypoint.color);
+            }
         }
         if large {
             draw_team(game, batch, state, &frame.view, rect, false);
@@ -7845,6 +7897,10 @@ fn waypoint_press(
                     state.name_form = Some(form);
                     state.mode = Mode::Name;
                     runtime::set_text_input(true);
+                }
+                SetRow::Share(name, shared) => {
+                    controller.share_waypoint_group(&state.world, &name, !shared);
+                    state.waypoint_groups_open = true;
                 }
                 SetRow::DeleteEmpty(name) => {
                     if controller.remove_empty_waypoint_group(&state.world, &name) {

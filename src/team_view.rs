@@ -106,3 +106,20 @@ mod tests {
         assert!(covers(7));
     }
 }
+
+/// A player's colour (ARGB), as everything of theirs is drawn: Team's, when Team is installed;
+/// without it, one fixed colour for every friend.
+pub fn colour(name: &str) -> u32 {
+    #[cfg(feature = "team")]
+    {
+        return team::colour(name);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = name;
+        FRIEND_COLOUR
+    }
+}
+
+/// A friend's colour without Team: Xaero's light blue, apart from Map's own waypoint colours.
+pub const FRIEND_COLOUR: u32 = 0xff3a_b3da;
