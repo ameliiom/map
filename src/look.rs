@@ -1042,7 +1042,8 @@ pub struct WaypointList {
     pub filter: Rect,
     pub band: Rect,
     pub rows: Vec<Rect>,
-    pub actions: [Rect; 5],
+    /// Edit (or Add), Teleport, Enable/Disable, Delete.
+    pub actions: [Rect; 4],
     pub done: Rect,
 }
 
@@ -1070,7 +1071,7 @@ pub fn waypoint_list(screen: [f32; 2], rows: usize, rtl: bool) -> WaypointList {
     let rows = (0..rows.min(waypoint_rows(h)))
         .map(|i| [cx - (row_w * 0.5).floor(), 59.0 + i as f32 * WAYPOINT_ROW[1], row_w, WAYPOINT_ROW[1]])
         .collect();
-    let pitch = ((wide - sw) / 4.0).floor();
+    let pitch = ((wide - sw) / 3.0).floor();
     let actions = std::array::from_fn(|i| m([left + i as f32 * pitch, h - 53.0, sw, SMALL_BUTTON[1]]));
     WaypointList {
         labels: [

@@ -1990,16 +1990,12 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         centred(game, batch, [batch.width * 0.5, list.band[1] + 8.], &text, look::GREY_TEXT);
     }
     let selected = selected_waypoint(state);
-    let [edit, teleport, share, enable, delete] = list.actions;
+    let [edit, teleport, enable, delete] = list.actions;
     button(game, batch, edit, &ui(if selected.is_some() { "edit" } else { "add" }), mouse, true);
     button(game, batch, teleport, &ui("teleport"), mouse, selected.is_some() && teleport_allowed(game));
-    button(game, batch, share, &ui("share"), mouse, selected.is_some());
     button(game, batch, enable, &ui(if selected.is_some_and(|point| point.options.disabled) { "enable" } else { "disable" }), mouse, selected.is_some());
     button(game, batch, delete, &ui("delete"), mouse, selected.is_some());
     button(game, batch, list.done, &ui("done"), mouse, true);
-    if look::hit(mouse, share) {
-        tooltip = Some((vec![vec![(ui("tip_share"), look::TOOLTIP_TEXT)]], share));
-    }
     if state.waypoint_groups_open {
         for (row, rect) in set_rows(game, state, list.set, list.actions[0][1]) {
             let chosen = matches!(&row, SetRow::Select(group) if *group == state.waypoint_group);
@@ -3187,15 +3183,6 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         let info_directory = xaero_settings::profile_directory(&directory, state.xaero_profile.as_deref());
         state.info_displays = xaero_settings::read_info_display(&info_directory).ok().flatten();
         state.xaero_radar_enabled = Some(enabled);
-    }
-    if let Some(point) = runtime::take_shared_waypoint()
-        && point.world == state.world
-    {
-        let message = match controller.merge_waypoints(&state.world,vec![point]) {
-            Ok(_) => tr("Waypoint imported", "Метка импортирована", "Repère importé", "Marcador importado", "Wegpunkt importiert").to_owned(),
-            Err(error) => error,
-        };
-        state.notice = Some((message,Instant::now()));
     }
     update_cache_ui(game, &mut state);
     poll_map_export(&mut state);
@@ -7850,20 +7837,6 @@ fn teleport_to_waypoint(game: &Game<'_>, state: &mut State, key: u64) {
     state.close = state.pending_command.is_some();
 }
 
-fn paste_waypoint(game: &Game<'_>, state: &mut State) {
-    let clipboard = game.clipboard.text();
-    let dimension = game.native_player().map_or(Dimension::Overworld, |player| Dimension::from_id(player.dimension));
-    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-    let message = match runtime::receive_shared_waypoint(&clipboard, &state.world, dimension) {
-        Some(point) => match controller.merge_waypoints(&state.world, vec![point]) {
-            Ok(_) => ui("waypoint_imported"),
-            Err(error) => error,
-        },
-        None => ui("no_waypoint_link"),
-    };
-    state.notice = Some((message, Instant::now()));
-}
-
 fn waypoint_press(
     game: &Game<'_>,
     state: &mut State,
@@ -7963,21 +7936,18 @@ fn waypoint_press(
         }
         return;
     }
-    let [edit, teleport, share, enable, delete] = list.actions;
-    let selected = selected_waypoint(state).map(|point| (point.key(), point.share_link()));
+    let [edit, teleport, enable, delete] = list.actions;
+    let selected = selected_waypoint(state).map(Waypoint::key);
     if look::hit(mouse, edit) {
         match selected {
-            Some((key, _)) => edit_waypoint(state, key),
+            Some(key) => edit_waypoint(state, key),
             None => create_waypoint_here(game, state),
         }
         return;
     }
-    let Some((key, link)) = selected else { return };
+    let Some(key) = selected else { return };
     if look::hit(mouse, teleport) && teleport_allowed(game) {
         teleport_to_waypoint(game, state, key);
-    } else if look::hit(mouse, share) {
-        state.pending_copy = Some(link);
-        state.notice = Some((ui("link_copied"), Instant::now()));
     } else if look::hit(mouse, enable) {
         controller.change_waypoint(&state.world, key, |point| point.options.disabled = !point.options.disabled);
     } else if look::hit(mouse, delete) {
@@ -8257,11 +8227,6 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, modifiers: u32, canceled: &
             _=>{}
         }
         *canceled=true;
-        return;
-    }
-    if state.mode == Mode::Waypoints && key == "key.keyboard.v" && modifiers & CONTROL != 0 {
-        paste_waypoint(game, &mut state);
-        *canceled = true;
         return;
     }
     if state.mode == Mode::Waypoints && state.waypoint_groups_open && key=="key.keyboard.escape" {

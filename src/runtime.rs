@@ -2341,16 +2341,6 @@ pub struct WaypointOptions {
     pub temporary: bool,
 }
 
-static SHARED_WAYPOINT: Mutex<Option<Waypoint>> = Mutex::new(None);
-
-pub fn queue_shared_waypoint(point: Waypoint) {
-    *SHARED_WAYPOINT.lock().unwrap_or_else(|error| error.into_inner()) = Some(point);
-}
-
-pub fn take_shared_waypoint() -> Option<Waypoint> {
-    SHARED_WAYPOINT.lock().unwrap_or_else(|error| error.into_inner()).take()
-}
-
 /// Automatic death waypoints start black so their skull stands out.
 pub const DEATH_WAYPOINT_COLOR: u32 = 0x000000;
 /// A death waypoint is removed once the player gets this close, in blocks.

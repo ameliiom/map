@@ -357,7 +357,6 @@ impl Hooks for Mod {
 
     fn client_player_logging_out(&self, _: &mut dyn ClientHost, _: &mut ClientPlayerLoggingOutEvent) {
         radar::clear();
-        runtime::take_shared_waypoint();
         marks::reset();
         ground::client_reset();
         points::client_reset();
@@ -399,28 +398,6 @@ impl Hooks for Mod {
         marks::draw(event);
     }
 
-    fn register_client_commands(&self, _: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {
-        event.commands.push(Command::new("horizon_map_accept <waypoint:text>"));
-    }
-
-    fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
-        let Some(link) = event.command.strip_prefix("horizon_map_accept ") else { return Flow::Continue };
-        if let Some(server) = host.client_session().client_server() {
-            let world = if server.integrated_local {
-                server.save_folder.and_then(|folder| runtime::waypoint_world(true,&folder))
-            } else {
-                server.address.and_then(|address| runtime::waypoint_world(false,&address))
-            };
-            let dimension = runtime::Dimension::from_id(host.dimension());
-            if let Some(world) = world
-                && let Some(point) = runtime::receive_shared_waypoint(link,&world,dimension)
-            {
-                runtime::queue_shared_waypoint(point);
-            }
-        }
-        Flow::Cancel
-    }
-
     fn client_chat_received(
         &self,
         host: &mut dyn ClientHost,
@@ -433,23 +410,6 @@ impl Hooks for Mod {
         let dimension = runtime::Dimension::from_id(host.dimension());
         if event.sender == 0 {
             map_claims::receive(&line, dimension);
-        }
-        if let Some(point) = runtime::receive_shared_waypoint(&line, "server:incoming", dimension) {
-            use mod_api::text::{TextClick,TextStyle};
-            let link = point.share_link();
-            let mut save_style = TextStyle::default();
-            save_style.click = Some(TextClick::RunCommand(format!("/horizon_map_accept {link}")));
-            save_style.underlined = Some(true);
-            let mut copy_style = TextStyle::default();
-            copy_style.click = Some(TextClick::CopyToClipboard(link));
-            copy_style.underlined = Some(true);
-            let add = runtime::tr(" [Add waypoint]", " [Добавить метку]", " [Ajouter le repère]",
-                " [Añadir marcador]", " [Wegpunkt hinzufügen]");
-            let copy = runtime::tr(" [Copy waypoint]", " [Копировать метку]", " [Copier le repère]",
-                " [Copiar marcador]", " [Wegpunkt kopieren]");
-            *event.message = std::mem::take(event.message)
-                .append(Text::literal(add).with_style(save_style))
-                .append(Text::literal(copy).with_style(copy_style));
         }
         Flow::Continue
     }
